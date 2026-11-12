@@ -10,6 +10,7 @@ pub struct Connect {
     pub room: String,
     pub name: String,
     pub certificate: Option<PathBuf>,
+    pub insecure_tls: bool,
     pub input: String,
     pub output: String,
 }
@@ -29,6 +30,9 @@ impl Connect {
             || url.path() != "/"
         {
             bail!("Укажите только адрес сервера, без комнаты, пароля и пути");
+        }
+        if self.insecure_tls && url.scheme() != "https" {
+            bail!("Вход без проверки сертификата доступен только для HTTPS");
         }
         self.server = url.as_str().trim_end_matches('/').to_owned();
         let valid_room = !self.room.is_empty()
@@ -116,7 +120,13 @@ impl Api {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(Duration::from_secs(40));
-        if let Some(path) = &options.certificate {
+        if options.insecure_tls {
+            // Explicit opt-in for this connection only. Never follow a redirect
+            // with this verifier, or the bypass would apply to another server.
+            builder = builder
+                .danger_accept_invalid_certs(true)
+                .redirect(reqwest::redirect::Policy::none());
+        } else if let Some(path) = &options.certificate {
             let pem = std::fs::read(path).context("Не удалось прочитать PEM-сертификат сервера")?;
             builder = builder.add_root_certificate(
                 reqwest::Certificate::from_pem(&pem).context("Некорректный PEM-сертификат")?,
@@ -171,6 +181,7 @@ mod tests {
             room: room.into(),
             name: "  Тест  ".into(),
             certificate: None,
+            insecure_tls: false,
             input: String::new(),
             output: String::new(),
         }
@@ -201,5 +212,156 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"iceServers":[{"urls":"stun:one:3478"},{"urls":["turn:two:3478","turns:two:5349"],"username":"u","credential":"p"}]}"#).unwrap();
         assert_eq!(config.ice_servers[0].urls(), vec!["stun:one:3478"]);
         assert_eq!(config.ice_servers[1].urls().len(), 2);
+    }
+
+    #[test]
+    fn tls_bypass_is_explicit_temporary_and_does_not_follow_redirects() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+        };
+
+        struct Server {
+            url: String,
+            certificate: PathBuf,
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+                if let Some(thread) = self.thread.take() {
+                    thread.join().unwrap();
+                }
+                let _ = std::fs::remove_file(&self.certificate);
+            }
+        }
+
+        let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![key.cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key.key_pair.serialize_der()).into(),
+        )
+        .unwrap();
+        let config = Arc::new(config);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let certificate =
+            std::env::temp_dir().join(format!("mamla-test-cert-{}-{port}.pem", std::process::id()));
+        std::fs::write(&certificate, key.cert.pem()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((socket, _)) => {
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        socket
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let connection = rustls::ServerConnection::new(config.clone()).unwrap();
+                        let mut tls = rustls::StreamOwned::new(connection, socket);
+                        let mut request = [0; 4096];
+                        if let Ok(length) = tls.read(&mut request) {
+                            if length == 0 {
+                                continue;
+                            }
+                            let response = if request[..length].starts_with(b"GET /redirect ") {
+                                "HTTP/1.1 302 Found\r\nLocation: https://must-not-follow.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            } else {
+                                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+                            };
+                            let _ = tls.write_all(response.as_bytes());
+                            let _ = tls.flush();
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("TLS fixture: {error}"),
+                }
+            }
+        });
+        let server = Server {
+            url: format!("https://localhost:{port}"),
+            certificate,
+            stop,
+            thread: Some(thread),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let secure = options(&server.url, "room");
+            assert!(!secure.insecure_tls);
+            assert!(Api::new(&secure)
+                .unwrap()
+                .client
+                .get(&server.url)
+                .send()
+                .await
+                .unwrap_err()
+                .is_connect());
+
+            let mut insecure = secure.clone();
+            insecure.insecure_tls = true;
+            // A leftover certificate path must not be read in bypass mode.
+            insecure.certificate = Some(PathBuf::from("/no-such-mamla-certificate.pem"));
+            insecure.validate().unwrap();
+            let api = Api::new(&insecure).unwrap();
+            assert_eq!(
+                api.client.get(&server.url).send().await.unwrap().status(),
+                200
+            );
+            assert_eq!(
+                api.client
+                    .get(format!("{}/redirect", server.url))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                302
+            );
+
+            // Creating another ordinary connection must restore strict verification.
+            assert!(Api::new(&secure)
+                .unwrap()
+                .client
+                .get(&server.url)
+                .send()
+                .await
+                .unwrap_err()
+                .is_connect());
+            let mut trusted = secure;
+            trusted.certificate = Some(server.certificate.clone());
+            assert_eq!(
+                Api::new(&trusted)
+                    .unwrap()
+                    .client
+                    .get(&server.url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                200
+            );
+
+            insecure.server = "http://localhost:8080".into();
+            assert!(insecure.validate().is_err());
+        });
     }
 }

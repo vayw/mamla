@@ -183,6 +183,7 @@ mod tests {
                     room: room.clone(),
                     name: format!("Client {index}"),
                     certificate: None,
+                    insecure_tls: false,
                     input: String::new(),
                     output: String::new(),
                 };

@@ -4,7 +4,13 @@ mod protocol;
 
 use engine::{Command, UiEvent};
 use gtk::prelude::*;
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    sync::mpsc,
+    time::Duration,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 fn entry(parent: &gtk::Box, title: &str, value: &str, placeholder: &str) -> gtk::Entry {
@@ -74,6 +80,15 @@ fn build(app: &gtk::Application, smoke: bool) {
         "",
         "Необязательно: /home/user/mamla-cert.pem",
     );
+    let join_insecure = gtk::Button::with_label("Войти без проверки TLS");
+    join_insecure.add_css_class("destructive-action");
+    advanced.append(&join_insecure);
+    let warning = gtk::Label::new(Some(
+        "Без проверки TLS возможна подмена сервера. Используйте только для теста в доверенной сети.",
+    ));
+    warning.set_wrap(true);
+    warning.set_xalign(0.0);
+    advanced.append(&warning);
     let expander = gtk::Expander::builder()
         .label("Устройства и сертификат")
         .child(&advanced)
@@ -115,6 +130,7 @@ fn build(app: &gtk::Application, smoke: bool) {
     window.set_child(Some(&layout));
 
     let command: Rc<RefCell<Option<UnboundedSender<Command>>>> = Rc::new(RefCell::new(None));
+    let connection_insecure = Rc::new(Cell::new(false));
     let (ui_tx, ui_rx) = mpsc::channel();
     let fields = vec![
         server.clone(),
@@ -124,12 +140,22 @@ fn build(app: &gtk::Application, smoke: bool) {
         output.clone(),
         cert.clone(),
     ];
-    {
+    for (button, insecure_tls) in [(&join, false), (&join_insecure, true)] {
         let command = command.clone();
+        let connection_insecure = connection_insecure.clone();
         let fields = fields.clone();
         let leave = leave.clone();
+        let join = join.clone();
+        let join_insecure = join_insecure.clone();
         let status = status.clone();
-        join.connect_clicked(move |join| {
+        let server = server.clone();
+        let room = room.clone();
+        let name = name.clone();
+        let input = input.clone();
+        let output = output.clone();
+        let cert = cert.clone();
+        let ui_tx = ui_tx.clone();
+        button.connect_clicked(move |_| {
             let mut options = protocol::Connect {
                 server: server.text().into(),
                 room: room.text().into(),
@@ -141,6 +167,7 @@ fn build(app: &gtk::Application, smoke: bool) {
                 } else {
                     Some(PathBuf::from(cert.text().trim()))
                 },
+                insecure_tls,
             };
             if let Err(error) = options.validate() {
                 status.set_text(&error.to_string());
@@ -150,8 +177,14 @@ fn build(app: &gtk::Application, smoke: bool) {
                 field.set_sensitive(false);
             }
             join.set_sensitive(false);
+            join_insecure.set_sensitive(false);
             leave.set_sensitive(true);
-            status.set_text("Подключение…");
+            connection_insecure.set(insecure_tls);
+            status.set_text(if insecure_tls {
+                "Подключение без проверки сертификата сервера…"
+            } else {
+                "Подключение…"
+            });
             *command.borrow_mut() = Some(engine::start(options, ui_tx.clone()));
         });
     }
@@ -197,7 +230,11 @@ fn build(app: &gtk::Application, smoke: bool) {
             match event {
                 UiEvent::Connected => {
                     mute.set_sensitive(true);
-                    status.set_text("Вы в комнате. Голос идёт по WebRTC.");
+                    status.set_text(if connection_insecure.get() {
+                        "Вы в комнате. Внимание: сертификат сервера не проверяется."
+                    } else {
+                        "Вы в комнате. Голос идёт по WebRTC."
+                    });
                 }
                 UiEvent::Participants(rows) => {
                     while let Some(child) = people.first_child() {
@@ -228,6 +265,8 @@ fn build(app: &gtk::Application, smoke: bool) {
                 UiEvent::Stopped(error) => {
                     command.borrow_mut().take();
                     join.set_sensitive(true);
+                    join_insecure.set_sensitive(true);
+                    connection_insecure.set(false);
                     leave.set_sensitive(false);
                     mute.set_sensitive(false);
                     mute.set_active(false);
