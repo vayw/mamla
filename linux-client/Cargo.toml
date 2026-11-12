@@ -1,0 +1,28 @@
+[package]
+name = "mamla-linux"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Minimal native Mamla voice client for Linux and PipeWire"
+
+[dependencies]
+anyhow = "1"
+eventsource-stream = "0.2"
+futures-util = "0.3"
+glib = "0.20"
+gtk = { package = "gtk4", version = "0.9", features = ["v4_6"] }
+gst = { package = "gstreamer", version = "0.23", features = ["v1_20"] }
+gst-sdp = { package = "gstreamer-sdp", version = "0.23", features = ["v1_20"] }
+gst-webrtc = { package = "gstreamer-webrtc", version = "0.23", features = ["v1_20"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+url = "2"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
+lto = "thin"

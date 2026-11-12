@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111310">
+  <title>Mamla — голосовая комната</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header><a class="brand" href="/" aria-label="Mamla, главная"><span class="brand-mark" aria-hidden="true">m.</span>mamla</a><span class="tag">VOICE / POC</span></header>
+  <main>
+    <div class="eyebrow"><span class="dot"></span> ПРОСТО БЫТЬ НА СВЯЗИ</div>
+    <h1>Место для<br>ваших голосов<span class="accent">.</span></h1>
+    <p class="intro">Одна ссылка. Своя компания. Ничего лишнего.</p>
+    <section class="room" aria-labelledby="room-heading">
+      <div class="room-header"><div><span class="label">ГОЛОСОВАЯ КОМНАТА</span><h2 id="room-heading">Ваша комната</h2></div><button id="copy" class="secondary" type="button">Копировать ссылку <span aria-hidden="true">↗</span></button></div>
+      <form id="join-form">
+        <label for="name">Как вас представить?</label>
+        <div class="join-row"><input id="name" name="name" maxlength="32" placeholder="Ваше имя" autocomplete="nickname" required><button id="join" class="primary" type="submit">Войти в комнату <span aria-hidden="true">→</span></button></div>
+        <p class="hint">Для входа понадобится доступ к микрофону.</p>
+      </form>
+      <div id="call" hidden>
+        <div class="call-info"><span id="count">1 из 6 участников</span><span id="connection">Подключение…</span></div>
+        <div id="participants" class="participants"></div>
+        <div class="controls"><button id="mute" class="secondary" type="button" aria-pressed="false">Выключить микрофон</button><button id="leave" class="danger" type="button">Выйти <span aria-hidden="true">↗</span></button></div>
+      </div>
+      <p id="message" role="status" aria-live="polite"></p>
+      <button id="play" class="secondary" type="button" hidden>Включить звук участников</button>
+      <div class="room-footer"><span><span class="dot small"></span> До 6 участников</span><span>Без регистрации</span></div>
+    </section>
+    <p class="below">Хорошие разговоры начинаются с простого «привет».</p>
+  </main>
+  <footer><span>MAMLA · EARLY PROTOTYPE</span><span>Меньше интерфейса. Больше общения.</span></footer>
+</body>
+</html>
