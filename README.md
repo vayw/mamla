@@ -22,11 +22,25 @@ go test -race ./...
 go build -o mamla .
 ```
 
-Linux-бинарник (для ARM64 замените `amd64` на `arm64`):
+Статический Linux-бинарник сервера (нужны Go и Make):
 
 ```sh
-GOOS=linux GOARCH=amd64 go build -o /tmp/mamla-linux .
+make server                  # dist/mamla-linux-amd64 (также цель по умолчанию)
+make server GOARCH=arm64     # dist/mamla-linux-arm64
 ```
+
+Сборка использует `CGO_ENABLED=0`, не требует libc на целевой Linux-машине
+и работает в том числе при кросс-компиляции с macOS. HTML/CSS/JS уже встроены
+в бинарник; каталог `web` переносить не нужно. Это цель только для Go-сервера,
+нативный Rust/GTK-клиент собирается отдельно.
+
+Запуск на целевом Linux-хосте:
+
+```sh
+ADDR=0.0.0.0:8080 ./dist/mamla-linux-amd64
+```
+
+Путь результата можно переопределить: `make server OUTPUT=./mamla`.
 
 ## Подключение с другого компьютера
 
