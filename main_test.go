@@ -185,6 +185,11 @@ func TestUnexpectedDisconnect(t *testing.T) {
 
 func TestOriginAndStaticFiles(t *testing.T) {
 	handler := newVoiceServer(json.RawMessage(`[]`)).handler()
+	favicon := httptest.NewRecorder()
+	handler.ServeHTTP(favicon, httptest.NewRequest("GET", "/favicon.ico", nil))
+	if favicon.Code != http.StatusNoContent {
+		t.Fatalf("favicon: status %d", favicon.Code)
+	}
 	for _, path := range []string{"/", "/app.js", "/style.css", "/api/config"} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
@@ -199,4 +204,45 @@ func TestOriginAndStaticFiles(t *testing.T) {
 	if w.Code != 403 {
 		t.Fatal("cross-origin mutation allowed")
 	}
+}
+
+func TestHTTP2EventsSurviveIdleWriteDeadline(t *testing.T) {
+	v := newVoiceServer(json.RawMessage(`[]`))
+	srv := httptest.NewUnstartedServer(v.handler())
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	client := srv.Client()
+	res, err := client.Post(srv.URL+"/api/join", "application/json", strings.NewReader(`{"room":"idle-http2","name":"Test"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peer testPeer
+	err = json.NewDecoder(res.Body).Decode(&peer)
+	res.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 22*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/api/events", nil)
+	req.Header.Set("Authorization", "Bearer "+peer.Token)
+	res, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.ProtoMajor != 2 {
+		t.Fatalf("expected HTTP/2, got %s", res.Proto)
+	}
+	scanner := bufio.NewScanner(res.Body)
+	next(t, scanner, "ready")
+	// The first keepalive follows 15 seconds of silence. A 10-second write
+	// deadline must limit only an active write, not expire the idle H2 stream.
+	for scanner.Scan() {
+		if scanner.Text() == ": ping" {
+			return
+		}
+	}
+	t.Fatalf("HTTP/2 stream closed before its first heartbeat: %v", scanner.Err())
 }

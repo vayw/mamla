@@ -198,6 +198,9 @@ async function listen(session, abort) {
 }
 
 function friendlyError(error) {
+  if (error.name === 'TypeError' && /load failed|failed to fetch|networkerror/i.test(error.message)) {
+    return 'Не удалось выполнить сетевой запрос к серверу. Проверьте доступность сервера и доверие HTTPS-сертификату в браузере. Для самоподписанного сертификата Safari может потребовать добавить публичный сертификат в «Связку ключей» и разрешить доверие.';
+  }
   if (error.name === 'NotAllowedError') return 'Доступ к микрофону запрещён. Разрешите его в настройках браузера.';
   if (error.name === 'NotFoundError') return 'Микрофон не найден. Подключите его и попробуйте снова.';
   if (error.name === 'NotReadableError') return 'Не удалось открыть микрофон. Проверьте, не занят ли он другим приложением.';
@@ -270,7 +273,9 @@ $('join-form').addEventListener('submit', async (event) => {
     eventsAbort = new AbortController();
     listen(session, eventsAbort).catch((error) => {
       if (self === session && error.name !== 'AbortError') {
-        leave();
+        // Closing SSE already removes this session on the server. Avoid a
+        // redundant leave request that would report 401 for the expired token.
+        leave(false);
         message(friendlyError(error), true);
       }
     });

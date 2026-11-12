@@ -196,6 +196,9 @@ func (v *voiceServer) stream(w http.ResponseWriter, r *http.Request, s *session)
 	defer heartbeat.Stop()
 	write := func(data string) bool {
 		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		// HTTP/2 expires the stream when a write deadline elapses, even if
+		// the previous write completed. Bound writes, not the idle interval.
+		defer controller.SetWriteDeadline(time.Time{})
 		if _, err := io.WriteString(w, data); err != nil {
 			return false
 		}
@@ -222,6 +225,9 @@ func (v *voiceServer) stream(w http.ResponseWriter, r *http.Request, s *session)
 
 func (v *voiceServer) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]any{"iceServers": v.ice, "roomLimit": roomLimit})
 	})
