@@ -21,6 +21,52 @@ cd linux-client
 cargo run --locked
 ```
 
+Fedora 45 (обычная система с DNF):
+
+```sh
+sudo dnf install rust cargo gcc pkgconf-pkg-config gtk4-devel \
+  gstreamer1-devel gstreamer1-plugins-base-devel \
+  gstreamer1-plugins-bad-free-devel \
+  gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+  libnice-gstreamer1 pipewire pipewire-gstreamer wireplumber
+
+# Из корня скопированного проекта:
+cd linux-client
+cargo build --release --locked
+./target/release/mamla-linux
+```
+
+`pipewire-gstreamer` предоставляет `pipewiresrc` / `pipewiresink`,
+`libnice-gstreamer1` — ICE-плагины, а `gstreamer1-plugins-bad-free-devel` —
+библиотеку разработки WebRTC. Для используемого Opus достаточно пакетов Fedora;
+RPM Fusion для этого клиента не требуется.
+
+Проверить библиотеки и плагины перед запуском:
+
+```sh
+rustc --version
+pkg-config --modversion gtk4 gstreamer-1.0 gstreamer-sdp-1.0 gstreamer-webrtc-1.0
+gst-inspect-1.0 pipewiresrc
+gst-inspect-1.0 pipewiresink
+gst-inspect-1.0 webrtcbin
+gst-inspect-1.0 nicesrc
+wpctl status
+```
+
+Запускайте клиент из графической Wayland-сессии обычного пользователя.
+GTK4 самостоятельно выбирает оконный backend; отдельной реализации X11 в клиенте
+нет. XWayland для работы под Wayland не нужен. Если требуется явно выбрать backend:
+
+```sh
+GDK_BACKEND=wayland ./target/release/mamla-linux
+```
+
+Названия пакетов сверены с каталогом Fedora 45:
+[PipeWire](https://packages.fedoraproject.org/pkgs/pipewire/pipewire-gstreamer/fedora-45.html),
+[libnice](https://packages.fedoraproject.org/pkgs/libnice/libnice-gstreamer1/fedora-45.html),
+[WebRTC devel](https://packages.fedoraproject.org/pkgs/gstreamer1-plugins-bad-free/gstreamer1-plugins-bad-free-devel/fedora-45.html).
+Сборка именно на Fedora 45 пока не проверялась.
+
 Arch Linux:
 
 ```sh
@@ -96,15 +142,16 @@ Go-сервер нужен для списка участников и обме�
 ```sh
 cargo fmt --check
 cargo test
-# Открыть и закрыть настоящее GTK-окно в виртуальном X11-дисплее:
-xvfb-run -a cargo run -- --smoke-test
+# Открыть и закрыть GTK-окно в текущей графической Wayland-сессии:
+GDK_BACKEND=wayland cargo run --locked -- --smoke-test
 # Отдельно, при запущенном Go-сервере с ICE_SERVERS='[]':
 MAMLA_TEST_SERVER=http://127.0.0.1:8080 cargo test three_clients_join_mute_and_leave -- --ignored
 ```
 
 Проверено в Linux ARM64-контейнере: сборка, четыре обычных теста,
 отдельный интеграционный тест трёх клиентов через Go-сервер (join, mesh-соединения,
-mute, leave) и запуск/закрытие GTK-окна под Xvfb.
+mute, leave). Запуск/закрытие GTK-окна ранее проверялся под Xvfb;
+проверка окна в Wayland-сессии остаётся для реального Linux-хоста.
 
 Тест WebRTC передаёт синтетический звук в обе стороны между двумя настоящими
 GStreamer webrtcbin и проверяет, что он дошёл до декодера. Он не использует микрофон,
