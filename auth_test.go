@@ -216,6 +216,82 @@ func TestRevocationClosesExistingEventStream(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedJoinUsesAccountName(t *testing.T) {
+	v, srv, client := authFixture(t)
+	name := strings.Repeat("Я", 64)
+	key := acceptAccess(t, v.auth, client, srv.URL, name)
+	var peers []testPeer
+	for _, supplied := range []string{"", "Forged nickname"} {
+		response := accessRequest(t, client, srv.URL, "/api/join", map[string]string{"room": "friends", "name": supplied}, key, "")
+		accessStatus(t, response, 201)
+		var joined struct {
+			testPeer
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(response.body, &joined); err != nil {
+			t.Fatal(err)
+		}
+		if joined.Name != name {
+			t.Fatal("join did not return the account name")
+		}
+		peers = append(peers, joined.testPeer)
+		v.mu.Lock()
+		stored := v.sessions[joined.Token].Name
+		v.mu.Unlock()
+		if stored != name {
+			t.Fatal("stored participant has a forged name")
+		}
+	}
+	if peers[0].ID == peers[1].ID || peers[0].Token == peers[1].Token {
+		t.Fatal("same account needs separate call sessions")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	open := func(peer testPeer) *http.Response {
+		req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/api/events", nil)
+		req.Header.Set("Authorization", "Bearer "+peer.Token)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal("events request failed")
+		}
+		if res.StatusCode != 200 {
+			res.Body.Close()
+			t.Fatal("events status")
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+	first := bufio.NewScanner(open(peers[0]).Body)
+	next(t, first, "ready")
+	second := bufio.NewScanner(open(peers[1]).Body)
+	ready := next(t, second, "ready")["peers"].([]any)
+	if len(ready) != 1 || ready[0].(map[string]any)["name"] != name {
+		t.Fatal("ready event has incorrect account name")
+	}
+	if next(t, first, "peer-joined")["name"] != name {
+		t.Fatal("peer-joined event has incorrect account name")
+	}
+}
+
+func TestOpenJoinStillRequiresNickname(t *testing.T) {
+	v := newVoiceServer(json.RawMessage(`[]`))
+	srv := httptest.NewServer(v.handler())
+	defer srv.Close()
+	for _, name := range []string{"", strings.Repeat("Я", 33)} {
+		request(t, srv.URL, "/api/join", "", map[string]string{"room": "friends", "name": name}, 400)
+	}
+	var joined struct {
+		Name string `json:"name"`
+	}
+	response := request(t, srv.URL, "/api/join", "", map[string]string{"room": "friends", "name": "Гость"}, 201)
+	if err := json.Unmarshal(response, &joined); err != nil {
+		t.Fatal(err)
+	}
+	if joined.Name != "Гость" {
+		t.Fatal("open server lost nickname")
+	}
+}
+
 func TestBrowserSessionExpiresButSavedPersonalKeyStillWorks(t *testing.T) {
 	v, srv, browser := authFixture(t)
 	key := acceptAccess(t, v.auth, browser, srv.URL, "Friend")

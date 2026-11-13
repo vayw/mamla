@@ -56,7 +56,7 @@ impl Connect {
         if !valid_room {
             bail!("ID комнаты: 1–64 символа a–z, 0–9 и дефис; первый символ — буква или цифра");
         }
-        if self.name.is_empty() || self.name.chars().count() > 32 {
+        if self.access_key.is_empty() && (self.name.is_empty() || self.name.chars().count() > 32) {
             bail!("Имя должно содержать от 1 до 32 символов");
         }
         Ok(())
@@ -74,6 +74,8 @@ pub struct Participant {
 pub struct Session {
     pub id: String,
     pub token: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Clone, Deserialize, Default)]
@@ -229,6 +231,7 @@ mod tests {
         }
         let mut keyed = options("https://mamla.example", "room");
         keyed.access_key = format!("mk_{}", "A".repeat(43));
+        keyed.name.clear();
         keyed.validate().unwrap();
         keyed.access_key.push('\n');
         keyed.access_key.push_str("Injected: header");

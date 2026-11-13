@@ -36,8 +36,8 @@
     <section id="room-panel" class="room" hidden aria-labelledby="room-heading">
       <div class="room-header"><div><span class="label">ГОЛОСОВАЯ КОМНАТА</span><h2 id="room-heading">Ваша комната</h2></div><button id="copy" class="secondary" type="button">Копировать ссылку <span aria-hidden="true">↗</span></button></div>
       <form id="join-form">
-        <label for="name">Как вас представить?</label>
-        <div class="join-row"><input id="name" name="name" maxlength="32" placeholder="Ваше имя" autocomplete="nickname" required><button id="join" class="primary" type="submit">Войти в комнату <span aria-hidden="true">→</span></button></div>
+        <div id="nickname-fields"><label for="name">Как вас представить?</label><input id="name" name="name" maxlength="32" placeholder="Ваше имя" autocomplete="nickname" required></div>
+        <button id="join" class="primary" type="submit">Войти в комнату <span aria-hidden="true">→</span></button>
         <p class="hint">Для входа понадобится доступ к микрофону.</p>
       </form>
       <div id="call" hidden>

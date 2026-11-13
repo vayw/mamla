@@ -29,7 +29,7 @@ sudo apt install build-essential pkg-config libgtk-4-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   libgstreamer-plugins-bad1.0-dev \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-pipewire
+  gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-pipewire libsecret-tools
 cd linux-client
 cargo run --locked
 ```
@@ -41,7 +41,7 @@ sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk4-devel \
   gstreamer1-devel gstreamer1-plugins-base-devel \
   gstreamer1-plugins-bad-free-devel \
   gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
-  libnice-gstreamer1 pipewire pipewire-gstreamer wireplumber
+  libnice-gstreamer1 pipewire pipewire-gstreamer wireplumber libsecret
 
 # Из корня скопированного проекта:
 make client
@@ -83,7 +83,7 @@ Arch Linux:
 
 ```sh
 sudo pacman -S --needed rust base-devel pkgconf gtk4 gstreamer gst-plugins-base \
-  gst-plugins-good gst-plugins-bad libnice pipewire wireplumber
+  gst-plugins-good gst-plugins-bad libnice pipewire wireplumber libsecret
 cd linux-client
 cargo run --locked
 ```
@@ -96,13 +96,29 @@ cargo run --locked
 ## Подключение
 
 Если сервер требует доступ, сначала примите [приглашение в браузере](../AUTH.md),
-сохраните личный ключ и введите его в поле «Личный ключ доступа». На открытом
-локальном POC поле можно оставить пустым. Ключ не сохраняется между запусками.
+сохраните личный ключ и один раз введите его в поле «Личный ключ доступа»
+или импортируйте скачанный файл кнопкой «Импортировать ключ из файла…».
+На открытом локальном POC поле можно оставить пустым.
+
+Имя для сервера с авторизацией берётся из приглашения; вводить его не требуется.
+Последние 20 успешных подключений доступны в списке над адресом сервера.
+Настройки содержат только адреса и комнаты: `~/.config/mamla/connections.json`
+(или `$XDG_CONFIG_HOME/mamla/connections.json`), права файла — `0600`.
+
+Флажок «Сохранять ключ в системном хранилище» по умолчанию включён. Для него нужны
+`secret-tool` (пакет Fedora/Arch `libsecret`, Debian/Ubuntu `libsecret-tools`) и
+работающий, разблокированный Secret Service, например GNOME Keyring. После успешного
+входа ключ сохраняется отдельно от истории, по origin сервера (схема, домен и порт).
+При выборе сохранённого подключения ключ подставляется в фоне. Если хранилище
+недоступно, появится предупреждение: ключ останется в памяти окна без записи
+в обычные файлы. Выключение флажка не удаляет ранее сохранённые ключи; удаляйте их
+в менеджере системного хранилища. Для другого устройства импортируйте тот же файл
+ключа; файл истории не служит резервной копией доступа.
 
 1. Запустите Go-сервер на доступном адресе. Например на отдельной машине в LAN:
    `ADDR=0.0.0.0:8080 go run .`.
 2. В клиенте укажите сервер `http://192.168.0.235:8080`, ID комнаты `local-test`
-   и своё имя. Остальные вводят тот же сервер и ID комнаты.
+   и своё имя (только в открытом режиме). Остальные вводят тот же сервер и ID комнаты.
 3. Нажмите «Войти». В окне появятся участники и состояния WebRTC-соединений.
    Кнопка микрофона выключает отправку звука во все соединения.
 4. «Выйти» останавливает все аудиопайплайны, освобождает PipeWire-устройства
@@ -180,7 +196,7 @@ Go-сервер нужен для списка участников и обме�
 
 Это первый POC: нет AEC/шумоподавления в нативном аудиопайплайне, выбора устройств
 из выпадающего списка, push-to-talk, автоматического восстановления, упаковки
-в deb/AppImage и постоянной конфигурации. Используйте наушники, чтобы избежать эха.
+в deb/AppImage и сохранения настроек аудио между запусками. Используйте наушники, чтобы избежать эха.
 Выключение микрофона глушит аудио до Opus-кодирования; устройство остаётся открытым
 до выхода из комнаты. В пустой комнате capture-пайплайн ещё не создаётся.
 

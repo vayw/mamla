@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 // DOM stubs exercise module state and requests; these are not browser layout tests.
-async function fixture({ loseAcceptResponse = false } = {}) {
+async function fixture({ loseAcceptResponse = false, enabled = true } = {}) {
   const html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8');
   const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => [m[1], {
     hidden: true, disabled: false, value: '', textContent: '', listeners: new Map(),
@@ -22,7 +22,7 @@ async function fixture({ loseAcceptResponse = false } = {}) {
   const calls = [];
   globalThis.fetch = async (path, options = {}) => {
     calls.push({ path, ...options });
-    if (path === '/api/auth/status') return Response.json({ enabled: true, authenticated });
+    if (path === '/api/auth/status') return Response.json({ enabled, authenticated, name: authenticated ? 'Friend' : '' });
     const body = JSON.parse(options.body);
     if (path === '/api/auth/accept') {
       assert.equal(body.invite, 'mi_test-invite');
@@ -53,6 +53,10 @@ test('preview does not consume invite; acceptance creates local key and supports
   await f.click('accept-invite');
   assert.equal(await f.module.accessAllowed(), true);
   assert.equal(f.nodes.get('room-panel').hidden, false);
+  assert.equal(f.nodes.get('nickname-fields').hidden, true);
+  assert.equal(f.nodes.get('name').disabled, true);
+  assert.equal(f.nodes.get('name').required, false);
+  assert.equal(f.nodes.get('name').value, 'Friend');
   assert.equal(f.nodes.get('key-panel').hidden, false);
   const key = f.nodes.get('generated-key').value;
   assert.match(key, /^mk_[A-Za-z0-9_-]{43}$/);
@@ -66,6 +70,14 @@ test('preview does not consume invite; acceptance creates local key and supports
   assert.equal(await f.module.accessAllowed(), false);
   assert.equal(f.nodes.get('generated-key').value, '');
   assert.equal(f.nodes.get('key-panel').hidden, true);
+});
+
+test('open service still asks for a nickname', async () => {
+  const f = await fixture({ enabled: false });
+  assert.equal(await f.module.accessAllowed(), true);
+  assert.equal(f.nodes.get('nickname-fields').hidden, false);
+  assert.equal(f.nodes.get('name').disabled, false);
+  assert.equal(f.nodes.get('name').required, true);
 });
 
 test('a lost accept response preserves the locally generated key for recovery', async () => {

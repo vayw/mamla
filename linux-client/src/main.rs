@@ -1,7 +1,9 @@
 mod engine;
 mod gate;
 mod media;
+mod profiles;
 mod protocol;
+mod vault;
 
 use engine::{Command, UiEvent};
 use gtk::prelude::*;
@@ -13,6 +15,36 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedSender;
+
+enum VaultEvent {
+    Loaded {
+        server: String,
+        generation: u64,
+        result: Result<Option<String>, ()>,
+    },
+    Saved {
+        server: String,
+        generation: u64,
+        success: bool,
+    },
+}
+
+fn load_key(server: &gtk::Entry, generation: &Cell<u64>, tx: &mpsc::Sender<VaultEvent>) {
+    let Ok(server) = profiles::origin(&server.text()) else {
+        return;
+    };
+    let next = generation.get().wrapping_add(1);
+    generation.set(next);
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let result = vault::load(&server).map_err(|_| ());
+        let _ = tx.send(VaultEvent::Loaded {
+            server,
+            generation: next,
+            result,
+        });
+    });
+}
 
 fn entry(parent: &gtk::Box, title: &str, value: &str, placeholder: &str) -> gtk::Entry {
     let label = gtk::Label::new(Some(title));
@@ -48,6 +80,15 @@ fn build(app: &gtk::Application, smoke: bool) {
     subtitle.add_css_class("dim-label");
     layout.append(&subtitle);
 
+    let saved_profiles = Rc::new(RefCell::new(profiles::Profiles::load()));
+    let history = gtk::ComboBoxText::new();
+    history.set_tooltip_text(Some("Последние успешные подключения"));
+    for profile in &saved_profiles.borrow().entries {
+        history.append_text(&format!("{} · {}", profile.server, profile.room));
+    }
+    layout.append(&history);
+    history.set_visible(!saved_profiles.borrow().entries.is_empty());
+
     let server = entry(
         &layout,
         "Сервер",
@@ -60,7 +101,14 @@ fn build(app: &gtk::Application, smoke: bool) {
         "local-test",
         "Одинаковый у всех участников",
     );
-    let name = entry(&layout, "Ваше имя", "Гость", "Как вас представить?");
+    let nickname = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let name = entry(
+        &nickname,
+        "Имя на открытом сервере",
+        "Гость",
+        "Как вас представить?",
+    );
+    layout.append(&nickname);
     let access_key = entry(
         &layout,
         "Личный ключ доступа",
@@ -68,6 +116,19 @@ fn build(app: &gtk::Application, smoke: bool) {
         "mk_… — если сервер требует приглашение",
     );
     access_key.set_visibility(false);
+    let import_key = gtk::Button::with_label("Импортировать ключ из файла…");
+    layout.append(&import_key);
+    let remember_key = gtk::CheckButton::with_label("Сохранять ключ в системном хранилище");
+    remember_key.set_active(saved_profiles.borrow().remember_key);
+    layout.append(&remember_key);
+    let key_notice = gtk::Label::new(None);
+    key_notice.set_wrap(true);
+    key_notice.set_xalign(0.0);
+    layout.append(&key_notice);
+    {
+        let nickname = nickname.clone();
+        access_key.connect_changed(move |key| nickname.set_visible(key.text().trim().is_empty()));
+    }
 
     let advanced = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let input = entry(
@@ -174,6 +235,115 @@ fn build(app: &gtk::Application, smoke: bool) {
         .build();
     window.set_child(Some(&content));
 
+    let (vault_tx, vault_rx) = mpsc::channel();
+    let key_generation = Rc::new(Cell::new(0_u64));
+    {
+        let key = access_key.clone();
+        let notice = key_notice.clone();
+        let generation = key_generation.clone();
+        server.connect_changed(move |_| {
+            generation.set(generation.get().wrapping_add(1));
+            key.set_text("");
+            notice.set_text("");
+        });
+    }
+    {
+        let saved = saved_profiles.clone();
+        let server = server.clone();
+        let room = room.clone();
+        let remember = remember_key.clone();
+        let generation = key_generation.clone();
+        let tx = vault_tx.clone();
+        history.connect_changed(move |combo| {
+            let Some(index) = combo.active() else {
+                return;
+            };
+            let profile = saved.borrow().entries.get(index as usize).cloned();
+            if let Some(profile) = profile {
+                server.set_text(&profile.server);
+                room.set_text(&profile.room);
+                if remember.is_active() {
+                    load_key(&server, &generation, &tx);
+                }
+            }
+        });
+    }
+    {
+        let server = server.clone();
+        let key = access_key.clone();
+        let saved = saved_profiles.clone();
+        let generation = key_generation.clone();
+        let tx = vault_tx.clone();
+        let status = key_notice.clone();
+        remember_key.connect_toggled(move |button| {
+            let mut profiles = saved.borrow_mut();
+            profiles.remember_key = button.is_active();
+            if profiles.save().is_err() {
+                status.set_text("Не удалось сохранить настройки подключения.");
+            }
+            if button.is_active() && key.text().is_empty() {
+                load_key(&server, &generation, &tx);
+            }
+            if !button.is_active() {
+                generation.set(generation.get().wrapping_add(1));
+            }
+        });
+    }
+    {
+        let server_copy = server.clone();
+        let key = access_key.clone();
+        let remember = remember_key.clone();
+        let generation = key_generation.clone();
+        let tx = vault_tx.clone();
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(move |_| {
+            if remember.is_active() && key.text().is_empty() {
+                load_key(&server_copy, &generation, &tx);
+            }
+        });
+        server.add_controller(focus);
+    }
+    {
+        let parent = window.downgrade();
+        let key = access_key.clone();
+        let status = status.clone();
+        import_key.connect_clicked(move |_| {
+            let Some(parent) = parent.upgrade() else {
+                return;
+            };
+            let dialog = gtk::FileChooserNative::new(
+                Some("Личный ключ Mamla"),
+                Some(&parent),
+                gtk::FileChooserAction::Open,
+                Some("Открыть"),
+                Some("Отмена"),
+            );
+            dialog.set_modal(true);
+            let key = key.clone();
+            let status = status.clone();
+            dialog.connect_response(move |chooser, response| {
+                if response == gtk::ResponseType::Accept {
+                    let loaded = chooser.file().and_then(|f| f.path()).and_then(|path| {
+                        if std::fs::metadata(&path).ok()?.len() > 4096 {
+                            return None;
+                        }
+                        std::fs::read_to_string(path).ok()
+                    });
+                    if let Some(value) = loaded.filter(|v| vault::valid_key(v.trim())) {
+                        key.set_text(value.trim());
+                    } else {
+                        status.set_text("В файле не найден личный ключ Mamla mk_…");
+                    }
+                }
+                chooser.destroy();
+            });
+            dialog.show();
+        });
+    }
+    if !saved_profiles.borrow().entries.is_empty() {
+        history.set_active(Some(0));
+    }
+
     let command: Rc<RefCell<Option<UnboundedSender<Command>>>> = Rc::new(RefCell::new(None));
     let connection_insecure = Rc::new(Cell::new(false));
     let (ui_tx, ui_rx) = mpsc::channel();
@@ -195,6 +365,10 @@ fn build(app: &gtk::Application, smoke: bool) {
         let join = join.clone();
         let join_insecure = join_insecure.clone();
         let status = status.clone();
+        let remember = remember_key.clone();
+        let generation = key_generation.clone();
+        let history = history.clone();
+        let import_key = import_key.clone();
         let server = server.clone();
         let room = room.clone();
         let name = name.clone();
@@ -225,7 +399,11 @@ fn build(app: &gtk::Application, smoke: bool) {
             for field in &fields {
                 field.set_sensitive(false);
             }
+            generation.set(generation.get().wrapping_add(1));
+            remember.set_sensitive(false);
             join.set_sensitive(false);
+            history.set_sensitive(false);
+            import_key.set_sensitive(false);
             join_insecure.set_sensitive(false);
             leave.set_sensitive(true);
             connection_insecure.set(insecure_tls);
@@ -276,6 +454,38 @@ fn build(app: &gtk::Application, smoke: bool) {
         if weak_window.upgrade().is_none() {
             return glib::ControlFlow::Break;
         }
+        for event in vault_rx.try_iter() {
+            match event {
+                VaultEvent::Loaded {
+                    server: origin,
+                    generation,
+                    result,
+                } => {
+                    if generation != key_generation.get()
+                        || profiles::origin(&server.text()).ok().as_deref() != Some(origin.as_str())
+                        || !access_key.text().is_empty()
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(Some(key)) => { access_key.set_text(&key); key_notice.set_text(""); },
+                        Ok(None) => (),
+                        Err(()) => key_notice.set_text("Системное хранилище ключей недоступно. Можно вставить или импортировать ключ вручную."),
+                    }
+                }
+                VaultEvent::Saved {
+                    server: origin,
+                    generation,
+                    success,
+                } => {
+                    if generation == key_generation.get()
+                        && profiles::origin(&server.text()).ok().as_deref() == Some(origin.as_str())
+                    {
+                        key_notice.set_text(if success { "Ключ сохранён в системном хранилище." } else { "Ключ не сохранён: проверьте Secret Service / secret-tool. Ключ останется только до закрытия окна." });
+                    }
+                }
+            }
+        }
         for event in ui_rx.try_iter() {
             match event {
                 UiEvent::Connected => {
@@ -285,6 +495,35 @@ fn build(app: &gtk::Application, smoke: bool) {
                     } else {
                         "Вы в комнате. Голос идёт по WebRTC."
                     });
+                    let remembered = saved_profiles
+                        .borrow_mut()
+                        .remember(&server.text(), room.text().trim())
+                        .is_ok();
+                    if remembered {
+                        let entries = saved_profiles.borrow().entries.clone();
+                        history.remove_all();
+                        for entry in entries {
+                            history.append_text(&format!("{} · {}", entry.server, entry.room));
+                        }
+                        history.set_visible(true);
+                    } else {
+                        key_notice.set_text("Историю подключения сохранить не удалось.");
+                    }
+                    if remember_key.is_active() && !access_key.text().is_empty() {
+                        if let Ok(origin) = profiles::origin(&server.text()) {
+                            let key = access_key.text().trim().to_string();
+                            let tx = vault_tx.clone();
+                            let generation = key_generation.get();
+                            std::thread::spawn(move || {
+                                let success = vault::save(&origin, &key).is_ok();
+                                let _ = tx.send(VaultEvent::Saved {
+                                    server: origin,
+                                    generation,
+                                    success,
+                                });
+                            });
+                        }
+                    }
                 }
                 UiEvent::Participants(rows) => {
                     while let Some(child) = people.first_child() {
@@ -315,6 +554,9 @@ fn build(app: &gtk::Application, smoke: bool) {
                 UiEvent::Stopped(error) => {
                     command.borrow_mut().take();
                     join.set_sensitive(true);
+                    history.set_sensitive(true);
+                    import_key.set_sensitive(true);
+                    remember_key.set_sensitive(true);
                     join_insecure.set_sensitive(true);
                     connection_insecure.set(false);
                     leave.set_sensitive(false);

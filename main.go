@@ -132,8 +132,13 @@ func (v *voiceServer) join(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	if !roomPattern.MatchString(input.Room) || utf8.RuneCountInString(input.Name) < 1 || utf8.RuneCountInString(input.Name) > 32 {
-		fail(w, 400, "Нужно имя до 32 символов и корректный ID комнаты")
+	nameLimit := 32
+	if principal, ok := r.Context().Value(principalContextKey{}).(accessPrincipal); ok {
+		input.Name = principal.User.Name
+		nameLimit = 64
+	}
+	if !roomPattern.MatchString(input.Room) || utf8.RuneCountInString(input.Name) < 1 || utf8.RuneCountInString(input.Name) > nameLimit {
+		fail(w, 400, fmt.Sprintf("Нужно имя до %d символов и корректный ID комнаты", nameLimit))
 		return
 	}
 	v.mu.Lock()
@@ -162,7 +167,7 @@ func (v *voiceServer) join(w http.ResponseWriter, r *http.Request) {
 		s.owner = principal.User.ID
 	}
 	v.sessions[s.token] = s
-	respond(w, 201, map[string]any{"id": s.ID, "token": s.token})
+	respond(w, 201, map[string]any{"id": s.ID, "token": s.token, "name": s.Name})
 }
 
 func (v *voiceServer) authenticated(w http.ResponseWriter, r *http.Request, fn func(*session)) {

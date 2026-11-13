@@ -4,6 +4,7 @@ let invitation = new URLSearchParams(location.hash.slice(1)).get('invite');
 if (invitation) history.replaceState(null, '', location.pathname + location.search);
 let allowed = false;
 let enabled = false;
+let accountName = '';
 let personalKey = null;
 
 function notice(text) {
@@ -24,6 +25,10 @@ function roomScreen() {
   el('service-logout').hidden = !enabled;
   el('login-generated-key').hidden = true;
   el('access-mode').textContent = enabled ? 'Доступ по приглашению' : 'Без регистрации';
+  el('nickname-fields').hidden = enabled;
+  el('name').required = !enabled;
+  el('name').disabled = enabled;
+  if (enabled) el('name').value = accountName;
 }
 
 async function post(action, body) {
@@ -41,6 +46,7 @@ async function refresh() {
   if (!response.ok) throw new Error('Не удалось проверить доступ к сервису.');
   const status = await response.json();
   enabled = status.enabled;
+  accountName = status.name || '';
   if (!enabled || (status.authenticated && !invitation)) roomScreen();
   else loginScreen();
   return status.authenticated;

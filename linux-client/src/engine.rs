@@ -103,11 +103,14 @@ pub fn start(
 }
 
 async fn connect(
-    options: Connect,
+    mut options: Connect,
     commands: UnboundedReceiver<Command>,
     ui: &mpsc::Sender<UiEvent>,
     audio: AudioOptions,
 ) -> Result<()> {
+    if options.name.is_empty() {
+        options.name = "Гость".into();
+    }
     let api = Api::new(&options)?;
     let config: Config = protocol::check(
         api.client
@@ -129,6 +132,9 @@ async fn connect(
         .await?
         .json()
         .await?;
+    if !session.name.is_empty() {
+        options.name = session.name.clone();
+    }
     // Always release the server session, even if opening SSE or audio setup fails.
     let result = run_session(&api, &session, &options, &config, commands, ui, &audio).await;
     let _ = api.post("leave", &session.token, &Value::Null).await;
@@ -242,10 +248,8 @@ mod tests {
             .await;
             commands[0].send(Command::Mute(true)).unwrap();
             wait_for(&updates, &mut states, |s| {
-                s.iter().all(|rows| {
-                    rows.iter()
-                        .any(|r| r.name.starts_with("Client 0") && r.status == "Микрофон выключен")
-                })
+                s.iter()
+                    .all(|rows| rows.iter().any(|r| r.status == "Микрофон выключен"))
             })
             .await;
             commands[0].send(Command::Leave).unwrap();

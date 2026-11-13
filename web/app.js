@@ -264,7 +264,7 @@ $('join-form').addEventListener('submit', async (event) => {
       audioContext = new AudioContext();
       await audioContext.resume();
     } catch { audioContext = null; }
-    const local = tile({ id: self.id, name }, true);
+    const local = tile({ id: self.id, name: self.name || name }, true);
     monitor(self.id, stream, local);
     meterTimer = setInterval(() => {
       for (const [id, meter] of meters) {
