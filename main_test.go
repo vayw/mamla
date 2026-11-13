@@ -95,7 +95,7 @@ func next(t *testing.T, scanner *bufio.Scanner, want string) map[string]any {
 }
 
 func TestRoomLifecycleAndIsolation(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	srv := httptest.NewServer(v.handler())
 	defer srv.Close()
 	a := joinPeer(t, srv.URL, "friends", "Аня")
@@ -140,7 +140,7 @@ func TestRoomLifecycleAndIsolation(t *testing.T) {
 }
 
 func TestRoomCapacityValidationAndExpiry(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	srv := httptest.NewServer(v.handler())
 	defer srv.Close()
 	for i := 0; i < roomLimit; i++ {
@@ -159,7 +159,7 @@ func TestRoomCapacityValidationAndExpiry(t *testing.T) {
 }
 
 func TestUnexpectedDisconnect(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	srv := httptest.NewServer(v.handler())
 	defer srv.Close()
 	a := joinPeer(t, srv.URL, "room", "А")
@@ -184,7 +184,7 @@ func TestUnexpectedDisconnect(t *testing.T) {
 }
 
 func TestOriginAndStaticFiles(t *testing.T) {
-	handler := newVoiceServer(json.RawMessage(`[]`)).handler()
+	handler := newVoiceServer(json.RawMessage(`[]`), nil).handler()
 	favicon := httptest.NewRecorder()
 	handler.ServeHTTP(favicon, httptest.NewRequest("GET", "/favicon.ico", nil))
 	if favicon.Code != http.StatusNoContent {
@@ -207,7 +207,7 @@ func TestOriginAndStaticFiles(t *testing.T) {
 }
 
 func TestHTTP2EventsSurviveIdleWriteDeadline(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	srv := httptest.NewUnstartedServer(v.handler())
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
