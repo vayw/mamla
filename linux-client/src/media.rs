@@ -2,6 +2,7 @@ use crate::protocol::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use gst::prelude::*;
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
@@ -37,6 +38,7 @@ pub struct AudioOptions {
     pub input: String,
     pub output: String,
     pub synthetic: bool,
+    pub gate: Arc<crate::gate::Settings>,
 }
 
 pub fn check_plugins() -> Result<()> {
@@ -91,6 +93,32 @@ fn target(element: &gst::Element, name: &str) -> Result<()> {
         "path"
     };
     element.set_property(property, name);
+    Ok(())
+}
+
+fn attach_gate(pipeline: &gst::Pipeline, settings: Arc<crate::gate::Settings>) -> Result<()> {
+    let processor = Mutex::new(crate::gate::Gate::default());
+    let pad = pipeline
+        .by_name("noisegate")
+        .context("Нет noise gate")?
+        .static_pad("src")
+        .context("Нет audio pad")?;
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_mut() {
+            let result = (|| {
+                let mut processor = processor.lock().map_err(|_| ())?;
+                let mut data = buffer.make_mut().map_writable().map_err(|_| ())?;
+                processor.process(data.as_mut_slice(), &settings);
+                Ok::<_, ()>(())
+            })();
+            // Fail closed rather than transmit unprocessed audio.
+            if result.is_err() {
+                return gst::PadProbeReturn::Drop;
+            }
+        }
+        gst::PadProbeReturn::Ok
+    })
+    .context("Не удалось подключить noise gate")?;
     Ok(())
 }
 
@@ -149,13 +177,14 @@ impl Peer {
         } else {
             "pipewiresrc name=capture"
         };
-        let description = format!("webrtcbin name=rtc bundle-policy=max-bundle latency=60 {source} ! audio/x-raw ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=1 ! volume name=microphone ! opusenc bitrate=32000 inband-fec=true ! rtpopuspay pt={payload} ! application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload={payload} ! queue ! rtc.");
+        let description = format!("webrtcbin name=rtc bundle-policy=max-bundle latency=60 {source} ! audio/x-raw ! audioconvert ! audioresample ! audio/x-raw,format=F32LE,layout=interleaved,rate=48000,channels=1 ! identity name=noisegate ! volume name=microphone ! audioconvert ! opusenc bitrate=32000 audio-type=voice inband-fec=true dtx=true ! rtpopuspay pt={payload} ! application/x-rtp,media=audio,encoding-name=OPUS,clock-rate=48000,payload={payload} ! queue ! rtc.");
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("Не удалось создать аудиопайплайн"))?;
         let rtc = pipeline.by_name("rtc").context("Нет webrtcbin")?;
         let volume = pipeline.by_name("microphone").context("Нет volume")?;
         volume.set_property("mute", muted);
+        attach_gate(&pipeline, audio.gate.clone())?;
         if let Some(capture) = pipeline.by_name("capture") {
             target(&capture, &audio.input)?;
         }
@@ -375,6 +404,53 @@ impl Drop for Peer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_processes_real_gstreamer_buffers_without_dropping_them() {
+        gst::init().unwrap();
+        for (amplitude, quiet) in [(0.001, true), (0.2, false)] {
+            let pipeline = gst::parse::launch(&format!("audiotestsrc num-buffers=20 samplesperbuffer=480 volume={amplitude} ! audioconvert ! audio/x-raw,format=F32LE,rate=48000,channels=1 ! identity name=noisegate ! fakesink name=output signal-handoffs=true sync=false"))
+                .unwrap().downcast::<gst::Pipeline>().unwrap();
+            let settings = Arc::new(crate::gate::Settings::default());
+            settings.enable(true);
+            attach_gate(&pipeline, settings).unwrap();
+            let result = Arc::new(Mutex::new((0_usize, 0_f32)));
+            let captured = result.clone();
+            pipeline
+                .by_name("output")
+                .unwrap()
+                .connect("handoff", false, move |values| {
+                    let buffer = values[1].get::<gst::Buffer>().unwrap();
+                    let map = buffer.map_readable().unwrap();
+                    let peak = map
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap()).abs())
+                        .fold(0.0, f32::max);
+                    let mut result = captured.lock().unwrap();
+                    result.0 += 1;
+                    result.1 = result.1.max(peak);
+                    None
+                });
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline.bus().unwrap().timed_pop_filtered(
+                gst::ClockTime::from_seconds(3),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(matches!(
+                message.as_ref().map(|m| m.view()),
+                Some(gst::MessageView::Eos(_))
+            ));
+            let (buffers, peak) = *result.lock().unwrap();
+            assert_eq!(buffers, 20);
+            if quiet {
+                assert_eq!(peak, 0.0);
+            } else {
+                assert!(peak > 0.19);
+            }
+        }
+    }
 
     #[test]
     fn browser_opus_payload_and_turn_credentials() {

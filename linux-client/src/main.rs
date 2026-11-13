@@ -1,4 +1,5 @@
 mod engine;
+mod gate;
 mod media;
 mod protocol;
 
@@ -8,7 +9,7 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
-    sync::mpsc,
+    sync::{mpsc, Arc},
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -107,6 +108,39 @@ fn build(app: &gtk::Application, smoke: bool) {
     let mute = gtk::ToggleButton::with_label("Выключить микрофон");
     mute.set_sensitive(false);
     layout.append(&mute);
+    let gate_settings = Arc::new(gate::Settings::default());
+    let gate_enable = gtk::CheckButton::with_label("Noise gate — отсекать тихий фон");
+    layout.append(&gate_enable);
+    let gate_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    gate_row.append(&gtk::Label::new(Some("Порог, дБFS")));
+    let gate_threshold = gtk::Scale::with_range(gtk::Orientation::Horizontal, -80.0, -10.0, 1.0);
+    gate_threshold.set_hexpand(true);
+    gate_threshold.set_digits(0);
+    gate_threshold.set_draw_value(true);
+    gate_threshold.set_value(-45.0);
+    gate_threshold.set_sensitive(false);
+    gate_row.append(&gate_threshold);
+    layout.append(&gate_row);
+    let gate_hint = gtk::Label::new(Some(
+        "Выше порог — меньше фона, но тихая речь может обрезаться.",
+    ));
+    gate_hint.set_wrap(true);
+    gate_hint.set_xalign(0.0);
+    gate_hint.add_css_class("dim-label");
+    layout.append(&gate_hint);
+    {
+        let settings = gate_settings.clone();
+        let threshold = gate_threshold.clone();
+        gate_enable.connect_toggled(move |button| {
+            settings.enable(button.is_active());
+            threshold.set_sensitive(button.is_active());
+        });
+    }
+    {
+        let settings = gate_settings.clone();
+        gate_threshold
+            .connect_value_changed(move |scale| settings.threshold(scale.value().round() as i32));
+    }
     let status = gtk::Label::new(Some("Введите адрес сервера и ID комнаты."));
     status.set_wrap(true);
     status.set_xalign(0.0);
@@ -127,7 +161,11 @@ fn build(app: &gtk::Application, smoke: bool) {
     note.set_wrap(true);
     note.set_xalign(0.0);
     layout.append(&note);
-    window.set_child(Some(&layout));
+    let content = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&layout)
+        .build();
+    window.set_child(Some(&content));
 
     let command: Rc<RefCell<Option<UnboundedSender<Command>>>> = Rc::new(RefCell::new(None));
     let connection_insecure = Rc::new(Cell::new(false));
@@ -141,6 +179,7 @@ fn build(app: &gtk::Application, smoke: bool) {
         cert.clone(),
     ];
     for (button, insecure_tls) in [(&join, false), (&join_insecure, true)] {
+        let gate_settings = gate_settings.clone();
         let command = command.clone();
         let connection_insecure = connection_insecure.clone();
         let fields = fields.clone();
@@ -185,7 +224,8 @@ fn build(app: &gtk::Application, smoke: bool) {
             } else {
                 "Подключение…"
             });
-            *command.borrow_mut() = Some(engine::start(options, ui_tx.clone()));
+            *command.borrow_mut() =
+                Some(engine::start(options, ui_tx.clone(), gate_settings.clone()));
         });
     }
     {

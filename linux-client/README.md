@@ -9,6 +9,19 @@
 Нужен Rust 1.85+ (Cargo выбирает совместимые зависимости), GTK 4.6+, GStreamer 1.20+
 и работающая пользовательская PipeWire-сессия с WirePlumber.
 
+После установки зависимостей можно собрать клиент из корня проекта на Linux:
+
+```sh
+make client
+./dist/mamla-client
+```
+
+Цель собирает release-версию для архитектуры текущего Linux-хоста и копирует её
+в `dist/mamla-client`. Путь можно изменить: `make client CLIENT_OUTPUT=./mamla-client`.
+В отличие от Go-сервера, этот бинарник динамический: GTK4, GStreamer и PipeWire-плагины
+должны быть установлены и на машине запуска. Кросс-компиляция с macOS этой целью
+не предусмотрена. Для сборки через Make нужен пакет `make`.
+
 Debian 13 / Ubuntu 24.04 (Rust установите отдельно, если системный старее 1.85):
 
 ```sh
@@ -24,16 +37,15 @@ cargo run --locked
 Fedora 45 (обычная система с DNF):
 
 ```sh
-sudo dnf install rust cargo gcc pkgconf-pkg-config gtk4-devel \
+sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk4-devel \
   gstreamer1-devel gstreamer1-plugins-base-devel \
   gstreamer1-plugins-bad-free-devel \
   gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
   libnice-gstreamer1 pipewire pipewire-gstreamer wireplumber
 
 # Из корня скопированного проекта:
-cd linux-client
-cargo build --release --locked
-./target/release/mamla-linux
+make client
+./dist/mamla-client
 ```
 
 `pipewire-gstreamer` предоставляет `pipewiresrc` / `pipewiresink`,
@@ -58,7 +70,7 @@ GTK4 самостоятельно выбирает оконный backend; от�
 нет. XWayland для работы под Wayland не нужен. Если требуется явно выбрать backend:
 
 ```sh
-GDK_BACKEND=wayland ./target/release/mamla-linux
+GDK_BACKEND=wayland ./dist/mamla-client
 ```
 
 Названия пакетов сверены с каталогом Fedora 45:
@@ -116,6 +128,26 @@ DTLS-SRTP и при HTTP-сигналинге, но проверка подли�
 Следующее подключение обычной кнопкой снова проверяет TLS. WebRTC-медиатрафик
 остаётся зашифрованным, но без доверенного сигналинга нет надёжной проверки собеседника.
 
+## Noise gate
+
+Под кнопкой микрофона включите **«Noise gate — отсекать тихий фон»** и выставьте
+**порог в дБFS**. По умолчанию gate выключен, начальный порог — −45 дБFS,
+диапазон −80…−10. Изменения применяются сразу ко всем собеседникам, без переподключения.
+
+Начните с −45 дБFS и поднимайте порог, пока тихий фон не пропадёт. Например, −30
+отсекает больше звуков, чем −60, но может обрезать тихую речь. Порог измеряется
+относительно цифрового уровня микрофона, а не в акустических дБ SPL.
+
+Gate анализирует 5-мс RMS-окно до Opus-кодирования. Открытие занимает 5 мс,
+удержание — 150 мс, закрытие — 50 мс; гистерезис 3 дБ уменьшает переключения
+около порога. Это помогает сохранить короткие паузы в речи и избежать щелчков.
+Opus DTX уменьшает трафик тишины; служебные WebRTC-пакеты продолжают передаваться.
+
+Gate глушит тихий сигнал целиком: во время речи он не удаляет фоновый шум,
+не заменяет шумоподавление или эхоподавление. Настройки сохраняются на время
+работы окна, но не между запусками. Отдельная кнопка mute по-прежнему выключает
+микрофон независимо от gate.
+
 ## PipeWire
 
 По умолчанию используются системные микрофон и устройство воспроизведения.
@@ -159,7 +191,7 @@ GDK_BACKEND=wayland cargo run --locked -- --smoke-test
 MAMLA_TEST_SERVER=http://127.0.0.1:8080 cargo test three_clients_join_mute_and_leave -- --ignored
 ```
 
-Проверено в Linux ARM64-контейнере: сборка, четыре обычных теста,
+Ранее проверено в Linux ARM64-контейнере: сборка, обычные тесты,
 отдельный интеграционный тест трёх клиентов через Go-сервер (join, mesh-соединения,
 mute, leave). Запуск/закрытие GTK-окна ранее проверялся под Xvfb;
 проверка окна в Wayland-сессии остаётся для реального Linux-хоста.

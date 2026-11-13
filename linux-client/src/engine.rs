@@ -74,7 +74,11 @@ fn remote(person: Participant, initiator: bool) -> Remote {
     }
 }
 
-pub fn start(mut options: Connect, ui: mpsc::Sender<UiEvent>) -> UnboundedSender<Command> {
+pub fn start(
+    mut options: Connect,
+    ui: mpsc::Sender<UiEvent>,
+    gate: std::sync::Arc<crate::gate::Settings>,
+) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<()> {
@@ -87,6 +91,7 @@ pub fn start(mut options: Connect, ui: mpsc::Sender<UiEvent>) -> UnboundedSender
                 input: options.input.clone(),
                 output: options.output.clone(),
                 synthetic: false,
+                gate,
             };
             runtime.block_on(connect(options, rx, &ui, audio))
         })();
