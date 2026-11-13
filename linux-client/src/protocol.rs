@@ -9,6 +9,7 @@ pub struct Connect {
     pub server: String,
     pub room: String,
     pub name: String,
+    pub access_key: String,
     pub certificate: Option<PathBuf>,
     pub insecure_tls: bool,
     pub input: String,
@@ -18,6 +19,16 @@ pub struct Connect {
 impl Connect {
     pub fn validate(&mut self) -> Result<()> {
         self.name = self.name.trim().to_owned();
+        self.access_key = self.access_key.trim().to_owned();
+        if !self.access_key.is_empty()
+            && (!self.access_key.starts_with("mk_")
+                || self.access_key.len() != 46
+                || !self.access_key[3..]
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+        {
+            bail!("Нужен личный ключ доступа mk_… из приглашения");
+        }
         self.room = self.room.trim().to_owned();
         let url = Url::parse(self.server.trim())
             .context("Нужен URL сервера: http://host:port или https://host:port")?;
@@ -118,8 +129,17 @@ pub struct Api {
 impl Api {
     pub fn new(options: &Connect) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(Duration::from_secs(40));
+        if !options.access_key.is_empty() {
+            let mut headers = reqwest::header::HeaderMap::new();
+            let mut key = reqwest::header::HeaderValue::from_bytes(options.access_key.as_bytes())
+                .context("Некорректный ключ доступа")?;
+            key.set_sensitive(true);
+            headers.insert("x-mamla-key", key);
+            builder = builder.default_headers(headers);
+        }
         if options.insecure_tls {
             // Explicit opt-in for this connection only. Never follow a redirect
             // with this verifier, or the bypass would apply to another server.
@@ -162,6 +182,9 @@ pub async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
         return Ok(response);
     }
     let status = response.status();
+    if status.as_u16() == 401 && response.headers().contains_key("www-authenticate") {
+        bail!("Нужен личный ключ доступа в сервис; ключ отсутствует, недействителен или отозван");
+    }
     // Do not log arbitrary response bodies, SDP, tokens or TURN credentials.
     match status.as_u16() {
         401 => bail!("Сессия завершена — войдите заново"),
@@ -180,6 +203,7 @@ mod tests {
             server: server.into(),
             room: room.into(),
             name: "  Тест  ".into(),
+            access_key: String::new(),
             certificate: None,
             insecure_tls: false,
             input: String::new(),
@@ -203,6 +227,12 @@ mod tests {
         for room in ["", "-room", "../room", "UPPER", "привет"] {
             assert!(options("http://localhost:8080", room).validate().is_err());
         }
+        let mut keyed = options("https://mamla.example", "room");
+        keyed.access_key = format!("mk_{}", "A".repeat(43));
+        keyed.validate().unwrap();
+        keyed.access_key.push('\n');
+        keyed.access_key.push_str("Injected: header");
+        assert!(keyed.validate().is_err());
     }
 
     #[test]

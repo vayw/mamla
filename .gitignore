@@ -1,4 +1,6 @@
 /mamla
 /coverage.out
 /dist/
+/mamla-auth.json*
+/certs/
 /linux-client/target/

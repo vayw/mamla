@@ -1,3 +1,5 @@
+import { accessAllowed, accessExpired } from '/auth.js';
+
 const $ = (id) => document.getElementById(id);
 const room = new URLSearchParams(location.search).get('room') || makeRoom();
 const validRoom = /^[a-z0-9][a-z0-9-]{0,63}$/.test(room);
@@ -30,6 +32,7 @@ async function api(path, data, session = self) {
     body: JSON.stringify(data),
   });
   if (!response.ok) {
+    if (response.status === 401 && response.headers.get('WWW-Authenticate')?.startsWith('MamlaKey')) accessExpired();
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error || `Сервер ответил ${response.status}`);
   }
@@ -174,6 +177,7 @@ async function listen(session, abort) {
   const response = await fetch('/api/events', {
     headers: { Authorization: `Bearer ${session.token}` }, signal: abort.signal,
   });
+  if (response.status === 401 && response.headers.get('WWW-Authenticate')?.startsWith('MamlaKey')) accessExpired();
   if (!response.ok || !response.body) throw new Error('Не удалось подключиться к комнате');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -240,12 +244,16 @@ $('join-form').addEventListener('submit', async (event) => {
   $('join').disabled = true;
   message('Подключаем микрофон…');
   try {
+    if (!await accessAllowed()) { $('join').disabled = false; return; }
     if (!isSecureContext || !navigator.mediaDevices?.getUserMedia) {
       throw new Error('Для микрофона откройте приложение через HTTPS или localhost.');
     }
     if (!validRoom) throw new Error('Некорректная ссылка комнаты. Откройте главную страницу.');
     const response = await fetch('/api/config');
-    if (!response.ok) throw new Error('Сервер недоступен');
+    if (!response.ok) {
+      if (response.status === 401 && response.headers.get('WWW-Authenticate')?.startsWith('MamlaKey')) accessExpired();
+      throw new Error('Сервис недоступен или требуется повторный вход.');
+    }
     config = await response.json();
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     const name = $('name').value.trim();
@@ -317,6 +325,7 @@ $('play').addEventListener('click', async () => {
   } catch { message('Браузер пока блокирует звук. Нажмите ещё раз.', true); }
 });
 window.addEventListener('pagehide', () => leave());
+window.addEventListener('mamla:access-lost', () => leave(false));
 
 if (!validRoom) {
   message('Некорректная ссылка комнаты. Откройте главную страницу.', true);

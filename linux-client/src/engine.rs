@@ -187,6 +187,7 @@ mod tests {
                     server: server.clone(),
                     room: room.clone(),
                     name: format!("Client {index}"),
+                    access_key: std::env::var("MAMLA_TEST_KEY").unwrap_or_default(),
                     certificate: None,
                     insecure_tls: false,
                     input: String::new(),

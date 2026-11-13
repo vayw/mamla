@@ -190,7 +190,7 @@ func TestOriginAndStaticFiles(t *testing.T) {
 	if favicon.Code != http.StatusNoContent {
 		t.Fatalf("favicon: status %d", favicon.Code)
 	}
-	for _, path := range []string{"/", "/app.js", "/style.css", "/api/config"} {
+	for _, path := range []string{"/", "/app.js", "/auth.js", "/style.css", "/api/config", "/api/auth/status"} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		if w.Code != 200 || w.Body.Len() == 0 {

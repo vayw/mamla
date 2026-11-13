@@ -14,7 +14,26 @@
     <div class="eyebrow"><span class="dot"></span> ПРОСТО БЫТЬ НА СВЯЗИ</div>
     <h1>Место для<br>ваших голосов<span class="accent">.</span></h1>
     <p class="intro">Одна ссылка. Своя компания. Ничего лишнего.</p>
-    <section class="room" aria-labelledby="room-heading">
+    <section id="access-panel" class="room" hidden aria-labelledby="access-heading">
+      <h2 id="access-heading">Вход в Mamla</h2>
+      <div id="invite-panel" hidden>
+        <p class="hint">Вас пригласили в Mamla. Приглашение одноразовое. Личный ключ создастся в этом браузере — сохраните его для следующих входов.</p>
+        <button id="accept-invite" class="primary" type="button">Принять приглашение</button>
+      </div>
+      <form id="access-form">
+        <label for="access-key">Личный ключ доступа</label>
+        <div class="join-row"><input id="access-key" type="password" autocomplete="current-password" placeholder="mk_…" required><button id="access-login" class="primary" type="submit">Войти в сервис</button></div>
+      </form>
+      <p id="access-message" role="status" aria-live="polite"></p>
+    </section>
+    <section id="key-panel" class="room" hidden aria-labelledby="key-heading">
+      <h2 id="key-heading">Сохраните личный ключ</h2>
+      <p id="key-hint" class="hint">Скачайте ключ или сохраните в менеджере паролей. Он понадобится на другом устройстве и после завершения сессии.</p>
+      <textarea id="generated-key" readonly rows="3" aria-label="Ваш личный ключ" spellcheck="false"></textarea>
+      <div class="controls"><button id="download-key" class="secondary" type="button">Скачать ключ</button><button id="login-generated-key" class="secondary" type="button">Войти с этим ключом</button></div>
+      <button id="hide-key" class="secondary" type="button">Ключ сохранён — скрыть</button>
+    </section>
+    <section id="room-panel" class="room" hidden aria-labelledby="room-heading">
       <div class="room-header"><div><span class="label">ГОЛОСОВАЯ КОМНАТА</span><h2 id="room-heading">Ваша комната</h2></div><button id="copy" class="secondary" type="button">Копировать ссылку <span aria-hidden="true">↗</span></button></div>
       <form id="join-form">
         <label for="name">Как вас представить?</label>
@@ -28,7 +47,8 @@
       </div>
       <p id="message" role="status" aria-live="polite"></p>
       <button id="play" class="secondary" type="button" hidden>Включить звук участников</button>
-      <div class="room-footer"><span><span class="dot small"></span> До 6 участников</span><span>Без регистрации</span></div>
+      <div class="room-footer"><span><span class="dot small"></span> До 6 участников</span><span id="access-mode">Без регистрации</span></div>
+      <button id="service-logout" class="secondary" type="button" hidden>Выйти из сервиса</button>
     </section>
     <p class="below">Хорошие разговоры начинаются с простого «привет».</p>
   </main>

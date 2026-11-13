@@ -61,6 +61,13 @@ fn build(app: &gtk::Application, smoke: bool) {
         "Одинаковый у всех участников",
     );
     let name = entry(&layout, "Ваше имя", "Гость", "Как вас представить?");
+    let access_key = entry(
+        &layout,
+        "Личный ключ доступа",
+        "",
+        "mk_… — если сервер требует приглашение",
+    );
+    access_key.set_visibility(false);
 
     let advanced = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let input = entry(
@@ -85,7 +92,7 @@ fn build(app: &gtk::Application, smoke: bool) {
     join_insecure.add_css_class("destructive-action");
     advanced.append(&join_insecure);
     let warning = gtk::Label::new(Some(
-        "Без проверки TLS возможна подмена сервера. Используйте только для теста в доверенной сети.",
+        "Без проверки TLS возможны подмена сервера и кража ключа доступа. Только для теста в доверенной сети.",
     ));
     warning.set_wrap(true);
     warning.set_xalign(0.0);
@@ -174,6 +181,7 @@ fn build(app: &gtk::Application, smoke: bool) {
         server.clone(),
         room.clone(),
         name.clone(),
+        access_key.clone(),
         input.clone(),
         output.clone(),
         cert.clone(),
@@ -190,6 +198,7 @@ fn build(app: &gtk::Application, smoke: bool) {
         let server = server.clone();
         let room = room.clone();
         let name = name.clone();
+        let access_key = access_key.clone();
         let input = input.clone();
         let output = output.clone();
         let cert = cert.clone();
@@ -199,6 +208,7 @@ fn build(app: &gtk::Application, smoke: bool) {
                 server: server.text().into(),
                 room: room.text().into(),
                 name: name.text().into(),
+                access_key: access_key.text().into(),
                 input: input.text().trim().into(),
                 output: output.text().trim().into(),
                 certificate: if cert.text().trim().is_empty() {

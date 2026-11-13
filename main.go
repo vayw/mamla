@@ -44,6 +44,7 @@ type session struct {
 	events      chan event
 	done        chan struct{}
 	once        sync.Once
+	owner       string
 }
 
 func (s *session) stop() { s.once.Do(func() { close(s.done) }) }
@@ -58,13 +59,15 @@ func (s *session) send(e event) {
 }
 
 type voiceServer struct {
-	mu       sync.Mutex
-	sessions map[string]*session
-	ice      json.RawMessage
+	mu        sync.Mutex
+	sessions  map[string]*session
+	ice       json.RawMessage
+	auth      *authStore
+	heartbeat time.Duration
 }
 
 func newVoiceServer(ice json.RawMessage) *voiceServer {
-	return &voiceServer{sessions: make(map[string]*session), ice: ice}
+	return &voiceServer{sessions: make(map[string]*session), ice: ice, heartbeat: 15 * time.Second}
 }
 
 func randomID(bytes int) string {
@@ -155,6 +158,9 @@ func (v *voiceServer) join(w http.ResponseWriter, r *http.Request) {
 	}
 	s := &session{participant: participant{ID: randomID(12), Name: input.Name}, room: input.Room,
 		token: randomID(32), created: time.Now(), events: make(chan event, 128), done: make(chan struct{})}
+	if principal, ok := r.Context().Value(principalContextKey{}).(accessPrincipal); ok {
+		s.owner = principal.User.ID
+	}
 	v.sessions[s.token] = s
 	respond(w, 201, map[string]any{"id": s.ID, "token": s.token})
 }
@@ -167,6 +173,14 @@ func (v *voiceServer) authenticated(w http.ResponseWriter, r *http.Request, fn f
 		v.mu.Unlock()
 		fail(w, 401, "Сессия завершена, войдите снова")
 		return
+	}
+	if v.auth != nil {
+		principal, ok := r.Context().Value(principalContextKey{}).(accessPrincipal)
+		if !ok || principal.User.ID != s.owner {
+			v.mu.Unlock()
+			fail(w, 403, "Чужая сессия комнаты")
+			return
+		}
 	}
 	// The callback owns this lock, including releasing it for a streaming response.
 	fn(s)
@@ -192,7 +206,7 @@ func (v *voiceServer) stream(w http.ResponseWriter, r *http.Request, s *session)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
 	controller := http.NewResponseController(w)
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := time.NewTicker(v.heartbeat)
 	defer heartbeat.Stop()
 	write := func(data string) bool {
 		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -216,6 +230,11 @@ func (v *voiceServer) stream(w http.ResponseWriter, r *http.Request, s *session)
 				return
 			}
 		case <-heartbeat.C:
+			if v.auth != nil {
+				if _, err := v.auth.principal(r); err != nil {
+					return
+				}
+			}
 			if !write(": ping\n\n") {
 				return
 			}
@@ -225,6 +244,7 @@ func (v *voiceServer) stream(w http.ResponseWriter, r *http.Request, s *session)
 
 func (v *voiceServer) handler() http.Handler {
 	mux := http.NewServeMux()
+	v.authRoutes(mux)
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -287,14 +307,14 @@ func (v *voiceServer) handler() http.Handler {
 			fail(w, 404, "Участник отключился")
 		})
 	})
-	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"} {
+	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/auth.js": "auth.js", "/style.css": "style.css"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != path {
 				http.NotFound(w, r)
 				return
 			}
 			body, _ := assets.ReadFile("web/" + file)
-			contentType := map[string]string{"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
+			contentType := map[string]string{"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "auth.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
 			w.Header().Set("Content-Type", contentType[file])
 			_, _ = w.Write(body)
 		})
@@ -309,11 +329,30 @@ func (v *voiceServer) handler() http.Handler {
 			fail(w, 403, "Другой origin запрещён")
 			return
 		}
+		if v.auth != nil && strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/api/auth/") {
+			principal, err := v.auth.principal(r)
+			if err != nil {
+				if !errors.Is(err, errAccess) {
+					fail(w, 503, "Хранилище доступа недоступно")
+					return
+				}
+				w.Header().Set("WWW-Authenticate", `MamlaKey realm="mamla"`)
+				fail(w, 401, "Требуется вход в сервис")
+				return
+			}
+			r = withPrincipal(r, principal)
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
 func main() {
+	if handled, err := authCLI(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	ice := json.RawMessage(`[{"urls":"stun:stun.l.google.com:19302"}]`)
 	if configured := os.Getenv("ICE_SERVERS"); configured != "" {
 		var parsed []struct {
@@ -332,7 +371,17 @@ func main() {
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("TLS_CERT_FILE and TLS_KEY_FILE must be set together")
 	}
-	server := &http.Server{Addr: addr, Handler: newVoiceServer(ice).handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	voice := newVoiceServer(ice)
+	if path := os.Getenv("AUTH_FILE"); path != "" {
+		voice.auth = &authStore{path: path}
+		if err := voice.auth.data(true, func(*accessData) error { return nil }); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Service access: invitation authentication enabled")
+	} else {
+		fmt.Println("Service access: open (set AUTH_FILE to require invitations)")
+	}
+	server := &http.Server{Addr: addr, Handler: voice.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	var err error
 	if certFile != "" {
 		fmt.Printf("Mamla: https://%s\n", addr)
