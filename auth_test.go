@@ -66,7 +66,7 @@ func accessStatus(t *testing.T, response accessResponse, status int) {
 }
 func authFixture(t *testing.T) (*voiceServer, *httptest.Server, *http.Client) {
 	t.Helper()
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	v.auth = &authStore{path: filepath.Join(t.TempDir(), "auth.json")}
 	v.heartbeat = 20 * time.Millisecond
 	srv := httptest.NewTLSServer(v.handler())
@@ -274,7 +274,7 @@ func TestAuthenticatedJoinUsesAccountName(t *testing.T) {
 }
 
 func TestOpenJoinStillRequiresNickname(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	srv := httptest.NewServer(v.handler())
 	defer srv.Close()
 	for _, name := range []string{"", strings.Repeat("Я", 33)} {
@@ -421,7 +421,7 @@ func TestInviteCLIAndSecretFreeListing(t *testing.T) {
 }
 
 func TestAccessBehindTLSTerminatorWithHTTPUpstream(t *testing.T) {
-	v := newVoiceServer(json.RawMessage(`[]`))
+	v := newVoiceServer(json.RawMessage(`[]`), nil)
 	v.auth = &authStore{path: filepath.Join(t.TempDir(), "auth.json")}
 	upstream := httptest.NewServer(v.handler())
 	defer upstream.Close()

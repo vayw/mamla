@@ -10,7 +10,7 @@ CLIENT_OUTPUT ?= dist/mamla-client
 .PHONY: server
 server:
 	mkdir -p "$(dir $(OUTPUT))"
-	CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" $(GO) build -trimpath -ldflags="-s -w" -o "$(OUTPUT)" .
+	CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" $(GO) build -trimpath -ldflags='-s -w -extldflags "-static"' -o "$(OUTPUT)" .
 
 .PHONY: client
 client:

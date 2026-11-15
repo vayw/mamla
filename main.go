@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,12 +63,13 @@ type voiceServer struct {
 	mu        sync.Mutex
 	sessions  map[string]*session
 	ice       json.RawMessage
+	turn      *turnProvider
 	auth      *authStore
 	heartbeat time.Duration
 }
 
-func newVoiceServer(ice json.RawMessage) *voiceServer {
-	return &voiceServer{sessions: make(map[string]*session), ice: ice, heartbeat: 15 * time.Second}
+func newVoiceServer(ice json.RawMessage, turn *turnProvider) *voiceServer {
+	return &voiceServer{sessions: make(map[string]*session), ice: ice, turn: turn, heartbeat: 15 * time.Second}
 }
 
 func randomID(bytes int) string {
@@ -254,7 +256,7 @@ func (v *voiceServer) handler() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, 200, map[string]any{"iceServers": v.ice, "roomLimit": roomLimit})
+		respond(w, 200, map[string]any{"iceServers": v.iceWithCredentials(), "roomLimit": roomLimit})
 	})
 	mux.HandleFunc("POST /api/join", v.join)
 	mux.HandleFunc("GET /api/events", func(w http.ResponseWriter, r *http.Request) {
@@ -358,16 +360,53 @@ func main() {
 		}
 		return
 	}
-	ice := json.RawMessage(`[{"urls":"stun:stun.l.google.com:19302"}]`)
+	iceRaw := json.RawMessage(`[{"urls":"stun:stun.l.google.com:19302"}]`)
 	if configured := os.Getenv("ICE_SERVERS"); configured != "" {
-		var parsed []struct {
-			URLs any `json:"urls"`
-		}
-		if err := json.Unmarshal([]byte(configured), &parsed); err != nil || parsed == nil {
-			log.Fatal("ICE_SERVERS must be a JSON array of RTCIceServer objects")
-		}
-		ice = json.RawMessage(configured)
+		iceRaw = json.RawMessage(configured)
 	}
+	var parsed []iceServer
+	if err := json.Unmarshal([]byte(iceRaw), &parsed); err != nil {
+		log.Fatal("ICE_SERVERS must be a JSON array of RTCIceServer objects")
+	}
+	ice := iceRaw
+
+	var turn *turnProvider
+	if turnAddr := os.Getenv("TURN_ADDR"); turnAddr != "" {
+		relayIP := os.Getenv("TURN_RELAY_IP")
+		realm := os.Getenv("TURN_REALM")
+		if realm == "" {
+			realm = realmFromTurnURLs(turnURLs(parsed))
+		}
+		minPort, maxPort, err := parsePortRange(os.Getenv("TURN_MIN_PORT"), os.Getenv("TURN_MAX_PORT"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		ttl := 24 * time.Hour
+		if v := os.Getenv("TURN_TTL_SECONDS"); v != "" {
+			sec, perr := strconv.Atoi(v)
+			if perr != nil || sec <= 0 {
+				log.Fatal("TURN_TTL_SECONDS must be a positive integer")
+			}
+			ttl = time.Duration(sec) * time.Second
+		}
+		tp := newTurnProvider(turnConfig{
+			addr:      turnAddr,
+			tcpAddr:   os.Getenv("TURN_TCP_ADDR"),
+			relayAddr: resolveRelayIP(relayIP),
+			realm:     realm,
+			minPort:   minPort,
+			maxPort:   maxPort,
+			ttl:       ttl,
+		})
+		if err := tp.start(); err != nil {
+			log.Fatal(err)
+		}
+		turn = tp
+		defer turn.stop()
+		fmt.Printf("TURN: in-process relay on %s (relay %s:%d-%d, tcp %q, realm %q, ttl %s)\n",
+			turnAddr, tp.cfg.relayAddr, tp.cfg.minPort, tp.cfg.maxPort, tp.cfg.tcpAddr, tp.cfg.realm, ttl)
+	}
+	voice := newVoiceServer(ice, turn)
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -376,7 +415,6 @@ func main() {
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("TLS_CERT_FILE and TLS_KEY_FILE must be set together")
 	}
-	voice := newVoiceServer(ice)
 	if path := os.Getenv("AUTH_FILE"); path != "" {
 		voice.auth = &authStore{path: path}
 		if err := voice.auth.data(true, func(*accessData) error { return nil }); err != nil {
