@@ -2,11 +2,21 @@ use crate::protocol::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use gst::prelude::*;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Instant,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub enum MediaEvent {
+    Statistics {
+        id: String,
+        data: Value,
+    },
     Negotiate(String),
     LocalDescription {
         id: String,
@@ -39,6 +49,7 @@ pub struct AudioOptions {
     pub output: String,
     pub synthetic: bool,
     pub gate: Arc<crate::gate::Settings>,
+    pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
 }
 
 pub fn check_plugins() -> Result<()> {
@@ -74,6 +85,96 @@ pub struct Peer {
     volume: gst::Element,
     id: String,
     tx: UnboundedSender<MediaEvent>,
+    metrics: Arc<AudioMetrics>,
+    diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    stats_pending: Arc<AtomicBool>,
+    gate: Arc<crate::gate::Settings>,
+}
+
+struct AudioMetrics {
+    started: Instant,
+    capture_buffers: AtomicU64,
+    playback_buffers: AtomicU64,
+    capture_at: AtomicU64,
+    playback_at: AtomicU64,
+    input_rms: AtomicU32,
+    send_rms: AtomicU32,
+}
+
+impl Default for AudioMetrics {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            capture_buffers: AtomicU64::new(0),
+            playback_buffers: AtomicU64::new(0),
+            capture_at: AtomicU64::new(0),
+            playback_at: AtomicU64::new(0),
+            input_rms: AtomicU32::new(0),
+            send_rms: AtomicU32::new(0),
+        }
+    }
+}
+
+impl AudioMetrics {
+    fn snapshot(&self, muted: bool) -> Value {
+        let age = |at: &AtomicU64, count: &AtomicU64| {
+            (count.load(Ordering::Relaxed) > 0).then(|| {
+                (self.started.elapsed().as_micros() as u64)
+                    .saturating_sub(at.load(Ordering::Relaxed))
+                    / 1000
+            })
+        };
+        json!({
+            "microphone":{"muted":muted,"buffers":self.capture_buffers.load(Ordering::Relaxed),
+                "ageMs":age(&self.capture_at, &self.capture_buffers),
+                "rms":f32::from_bits(self.input_rms.load(Ordering::Relaxed)),
+                "sendRms":f32::from_bits(self.send_rms.load(Ordering::Relaxed))},
+            "playback":{"buffers":self.playback_buffers.load(Ordering::Relaxed),
+                "ageMs":age(&self.playback_at, &self.playback_buffers)}
+        })
+    }
+}
+
+fn meter(
+    pad: &gst::Pad,
+    metrics: Arc<AudioMetrics>,
+    diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    input: bool,
+) {
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if !diagnostics.enabled() {
+            return gst::PadProbeReturn::Ok;
+        }
+        if let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() {
+            if let Ok(map) = buffer.map_readable() {
+                let mut total = 0.0_f64;
+                let mut count = 0;
+                for bytes in map.as_slice().chunks_exact(4) {
+                    let value = f32::from_le_bytes(bytes.try_into().unwrap());
+                    if value.is_finite() {
+                        total += (value as f64).powi(2);
+                        count += 1;
+                    }
+                }
+                let rms = if count > 0 {
+                    (total / count as f64).sqrt() as f32
+                } else {
+                    0.0
+                };
+                if input {
+                    metrics.input_rms.store(rms.to_bits(), Ordering::Relaxed);
+                    metrics.capture_buffers.fetch_add(1, Ordering::Relaxed);
+                    metrics.capture_at.store(
+                        metrics.started.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                } else {
+                    metrics.send_rms.store(rms.to_bits(), Ordering::Relaxed);
+                }
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
 }
 
 fn failed(tx: &UnboundedSender<MediaEvent>, id: &str, message: &str) {
@@ -183,6 +284,23 @@ impl Peer {
             .map_err(|_| anyhow!("Не удалось создать аудиопайплайн"))?;
         let rtc = pipeline.by_name("rtc").context("Нет webrtcbin")?;
         let volume = pipeline.by_name("microphone").context("Нет volume")?;
+        let metrics = Arc::new(AudioMetrics::default());
+        meter(
+            &pipeline
+                .by_name("noisegate")
+                .context("Нет noise gate")?
+                .static_pad("sink")
+                .context("Нет input pad")?,
+            metrics.clone(),
+            audio.diagnostics.clone(),
+            true,
+        );
+        meter(
+            &volume.static_pad("src").context("Нет microphone pad")?,
+            metrics.clone(),
+            audio.diagnostics.clone(),
+            false,
+        );
         volume.set_property("mute", muted);
         attach_gate(&pipeline, audio.gate.clone())?;
         if let Some(capture) = pipeline.by_name("capture") {
@@ -228,10 +346,26 @@ impl Peer {
         {
             let tx = tx.clone();
             let id = id.to_owned();
+            let diagnostics = audio.diagnostics.clone();
             rtc.connect_notify(Some("connection-state"), move |rtc, _| {
-                let state = match rtc
-                    .property::<gst_webrtc::WebRTCPeerConnectionState>("connection-state")
-                {
+                let connection =
+                    rtc.property::<gst_webrtc::WebRTCPeerConnectionState>("connection-state");
+                diagnostics.event(
+                    match connection {
+                        gst_webrtc::WebRTCPeerConnectionState::Connected => "connection-connected",
+                        gst_webrtc::WebRTCPeerConnectionState::Failed => "connection-failed",
+                        gst_webrtc::WebRTCPeerConnectionState::Disconnected => {
+                            "connection-disconnected"
+                        }
+                        gst_webrtc::WebRTCPeerConnectionState::Closed => "connection-closed",
+                        gst_webrtc::WebRTCPeerConnectionState::Connecting => {
+                            "connection-connecting"
+                        }
+                        _ => "connection-new",
+                    },
+                    Some(&id),
+                );
+                let state = match connection {
                     gst_webrtc::WebRTCPeerConnectionState::Connected => "На связи",
                     gst_webrtc::WebRTCPeerConnectionState::Failed => "Нет связи — перезайдите",
                     gst_webrtc::WebRTCPeerConnectionState::Disconnected => "Связь прервалась",
@@ -247,6 +381,7 @@ impl Peer {
         {
             let weak = pipeline.downgrade();
             let audio = audio.clone();
+            let metrics = metrics.clone();
             let tx = tx.clone();
             let id = id.to_owned();
             rtc.connect_pad_added(move |_, pad| {
@@ -256,6 +391,15 @@ impl Peer {
                     let sink = if audio.synthetic { "fakesink name=output sync=false async=false signal-handoffs=true" } else { "pipewiresink name=output" };
                     let bin = gst::parse::bin_from_description(&format!("queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! {sink}"), true)?;
                     let output = bin.by_name("output").context("Нет audio sink")?;
+                    let playback_metrics = metrics.clone();
+                    let diagnostics = audio.diagnostics.clone();
+                    output.static_pad("sink").context("Нет output pad")?.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                        if diagnostics.enabled() {
+                            playback_metrics.playback_buffers.fetch_add(1, Ordering::Relaxed);
+                            playback_metrics.playback_at.store(playback_metrics.started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
                     if !audio.synthetic { target(&output, &audio.output)?; }
                     #[cfg(test)]
                     if audio.synthetic {
@@ -294,6 +438,10 @@ impl Peer {
             volume,
             id: id.into(),
             tx,
+            metrics,
+            diagnostics: audio.diagnostics.clone(),
+            stats_pending: Arc::new(AtomicBool::new(false)),
+            gate: audio.gate.clone(),
         };
         peer.pipeline
             .set_state(gst::State::Playing)
@@ -303,6 +451,56 @@ impl Peer {
 
     pub fn mute(&self, muted: bool) {
         self.volume.set_property("mute", muted);
+    }
+
+    pub fn request_stats(&self) {
+        if !self.diagnostics.enabled() || self.stats_pending.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let pending = self.stats_pending.clone();
+        let metrics = self.metrics.clone();
+        let tx = self.tx.clone();
+        let id = self.id.clone();
+        let muted = self.volume.property::<bool>("mute");
+        let (gate_enabled, threshold_db) = self.gate.snapshot();
+        let connection = format!(
+            "{:?}",
+            self.rtc
+                .property::<gst_webrtc::WebRTCPeerConnectionState>("connection-state")
+        )
+        .to_ascii_lowercase();
+        let ice = format!(
+            "{:?}",
+            self.rtc
+                .property::<gst_webrtc::WebRTCICEConnectionState>("ice-connection-state")
+        )
+        .to_ascii_lowercase();
+        let signaling = format!(
+            "{:?}",
+            self.rtc
+                .property::<gst_webrtc::WebRTCSignalingState>("signaling-state")
+        )
+        .to_ascii_lowercase();
+        let promise = gst::Promise::with_change_func(move |reply| {
+            let mut data = match reply {
+                Ok(Some(reply)) if !reply.has_field("error") => {
+                    crate::diagnostics::project_stats(reply)
+                }
+                _ => json!({"statsUnavailable":true}),
+            };
+            let levels = metrics.snapshot(muted);
+            data["microphone"] = levels["microphone"].clone();
+            data["microphone"]["gateEnabled"] = json!(gate_enabled);
+            data["microphone"]["gateThresholdDb"] = json!(threshold_db);
+            data["playback"] = levels["playback"].clone();
+            data["connection"] = json!(connection);
+            data["ice"] = json!(ice);
+            data["signaling"] = json!(signaling);
+            pending.store(false, Ordering::Relaxed);
+            let _ = tx.send(MediaEvent::Statistics { id, data });
+        });
+        self.rtc
+            .emit_by_name::<()>("get-stats", &[&None::<gst::Pad>, &promise]);
     }
 
     pub fn create_description(&self, answer: bool) {
@@ -480,15 +678,38 @@ mod tests {
                 synthetic: true,
                 ..Default::default()
             };
+            audio.diagnostics.set_enabled(true);
             let a = Peer::new("a", &config, &audio, 111, false, tx.clone()).unwrap();
             let b = Peer::new("b", &config, &audio, 111, false, tx).unwrap();
             let mut offered = false;
             let mut ready = [false, false];
             let mut candidates: [Vec<Value>; 2] = Default::default();
             let mut heard = [false, false];
+            let mut measured = [false, false];
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
             tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                while let Some(event) = rx.recv().await {
+                loop {
+                    let event = tokio::select! {
+                        _ = ticker.tick() => { a.request_stats(); b.request_stats(); continue; },
+                        event = rx.recv() => event.expect("media channel closed"),
+                    };
                     match event {
+                        MediaEvent::Statistics { id, data } => {
+                            let sent = data["audio"].as_array().unwrap().iter().any(|row| {
+                                row["type"] == "outbound-rtp"
+                                    && row["packetsSent"].as_u64().unwrap_or(0) > 0
+                            });
+                            let received = data["audio"].as_array().unwrap().iter().any(|row| {
+                                row["type"] == "inbound-rtp"
+                                    && row["packetsReceived"].as_u64().unwrap_or(0) > 0
+                            });
+                            measured[usize::from(id != "a")] = sent
+                                && received
+                                && data["route"].is_object()
+                                && data["microphone"]["rms"].as_f64().unwrap_or(0.0) > 0.0
+                                && data["playback"]["buffers"].as_u64().unwrap_or(0) > 0;
+                            audio.diagnostics.sample(&id, data);
+                        }
                         MediaEvent::Negotiate(id) if id == "a" && !offered => {
                             offered = true;
                             a.create_description(false);
@@ -520,18 +741,24 @@ mod tests {
                         }
                         MediaEvent::Audio(id) => {
                             heard[usize::from(id != "a")] = true;
-                            if heard == [true, true] {
-                                break;
-                            }
                         }
                         MediaEvent::Failed { message, .. } => panic!("{message}"),
                         _ => (),
                     }
+                    if heard == [true, true] && measured == [true, true] {
+                        break;
+                    }
                 }
             })
             .await
-            .expect("WebRTC loopback did not deliver audio in both directions");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "WebRTC loopback audio or diagnostics missing: {}",
+                    audio.diagnostics.export()
+                )
+            });
             assert_eq!(heard, [true, true]);
+            assert_eq!(measured, [true, true]);
         });
     }
 }

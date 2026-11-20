@@ -190,11 +190,14 @@ func TestOriginAndStaticFiles(t *testing.T) {
 	if favicon.Code != http.StatusNoContent {
 		t.Fatalf("favicon: status %d", favicon.Code)
 	}
-	for _, path := range []string{"/", "/app.js", "/auth.js", "/style.css", "/api/config", "/api/auth/status"} {
+	for _, path := range []string{"/", "/app.js", "/auth.js", "/diagnostics.js", "/style.css", "/api/config", "/api/auth/status"} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		if w.Code != 200 || w.Body.Len() == 0 {
 			t.Fatalf("%s not served", path)
+		}
+		if strings.HasSuffix(path, ".js") && w.Header().Get("Content-Type") != "text/javascript; charset=utf-8" {
+			t.Fatalf("%s has incorrect JavaScript content type", path)
 		}
 	}
 	r := httptest.NewRequest("POST", "/api/join", strings.NewReader(`{"room":"a","name":"b"}`))

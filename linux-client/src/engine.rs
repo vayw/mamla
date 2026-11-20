@@ -78,9 +78,11 @@ pub fn start(
     mut options: Connect,
     ui: mpsc::Sender<UiEvent>,
     gate: std::sync::Arc<crate::gate::Settings>,
+    diagnostics: std::sync::Arc<crate::diagnostics::Diagnostics>,
 ) -> UnboundedSender<Command> {
     let (tx, rx) = unbounded_channel();
     std::thread::spawn(move || {
+        diagnostics.begin_session();
         let result = (|| -> Result<()> {
             options.validate()?;
             media::check_plugins()?;
@@ -92,9 +94,18 @@ pub fn start(
                 output: options.output.clone(),
                 synthetic: false,
                 gate,
+                diagnostics: diagnostics.clone(),
             };
             runtime.block_on(connect(options, rx, &ui, audio))
         })();
+        diagnostics.event(
+            if result.is_ok() {
+                "session-left"
+            } else {
+                "session-error"
+            },
+            None,
+        );
         let _ = ui.send(UiEvent::Stopped(
             result.err().map(|error| error.to_string()),
         ));
@@ -293,11 +304,19 @@ async fn run_session(
     let (media_tx, mut media_rx) = unbounded_channel();
     let mut peers = BTreeMap::<String, Remote>::new();
     let mut muted = false;
+    let mut stats_timer = tokio::time::interval(Duration::from_secs(1));
+    stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = stats_timer.tick() => {
+                if audio.diagnostics.enabled() {
+                    for peer in peers.values() { if let Some(media) = &peer.media { media.request_stats(); } }
+                }
+            },
             command = commands.recv() => match command {
                 Some(Command::Mute(value)) => {
                     muted = value;
+                    audio.diagnostics.event(if muted { "microphone-disabled" } else { "microphone-enabled" }, None);
                     for peer in peers.values() { if let Some(media) = &peer.media { media.mute(muted); } }
                     let _ = ui.send(UiEvent::Muted(muted));
                     publish(ui, options, muted, &peers);
@@ -310,6 +329,7 @@ async fn run_session(
                 let event: Event = serde_json::from_str(&frame.data).context("Некорректное событие сервера")?;
                 match event {
                     Event::Ready { peers: people } => {
+                        audio.diagnostics.event("signaling-ready", None);
                         let _ = ui.send(UiEvent::Connected);
                         for person in people {
                             if person.id == session.id || peers.contains_key(&person.id) { continue; }
@@ -320,7 +340,7 @@ async fn run_session(
                     }
                     Event::Joined(person) => { if person.id != session.id { peers.entry(person.id.clone()).or_insert_with(|| remote(person, false)); } }
                     Event::Updated(person) => { if let Some(peer) = peers.get_mut(&person.id) { peer.person = person; } }
-                    Event::Left { id } => { peers.remove(&id); }
+                    Event::Left { id } => { audio.diagnostics.event("peer-left", Some(&id)); peers.remove(&id); }
                     Event::Signal { from, kind, data } => {
                         if let Some(peer) = peers.get_mut(&from) {
                             match kind.as_str() {
@@ -340,6 +360,7 @@ async fn run_session(
                                         peer.media = Some(Peer::new(&from, config, &audio, payload, muted, media_tx.clone())?);
                                     }
                                     peer.media.as_ref().unwrap().remote_description(&kind, sdp)?;
+                                    audio.diagnostics.event(if kind == "offer" { "offer-received" } else { "answer-received" }, Some(&from));
                                 }
                                 _ => (),
                             }
@@ -351,6 +372,12 @@ async fn run_session(
             event = media_rx.recv() => {
                 let Some(event) = event else { break; };
                 match event {
+                    MediaEvent::Statistics { id, mut data } => {
+                        if let Some(peer) = peers.get(&id) {
+                            data["remoteMuted"] = json!(peer.person.muted);
+                            audio.diagnostics.sample(&id, data);
+                        }
+                    }
                     MediaEvent::Negotiate(id) => {
                         if let Some(peer) = peers.get_mut(&id) {
                             if peer.initiator && !peer.offered {
@@ -360,12 +387,14 @@ async fn run_session(
                         }
                     }
                     MediaEvent::LocalDescription { id, kind, sdp } => {
+                        audio.diagnostics.event(if kind == "offer" { "offer-created" } else { "answer-created" }, Some(&id));
                         if peers.contains_key(&id) { send_signal(api, session, &id, &kind, json!({"type":kind, "sdp":sdp})).await?; }
                     }
                     MediaEvent::Ice { id, data } => {
                         if peers.contains_key(&id) { send_signal(api, session, &id, "ice", data).await?; }
                     }
                     MediaEvent::RemoteSet { id, answer } => {
+                        audio.diagnostics.event(if answer { "offer-applied" } else { "answer-applied" }, Some(&id));
                         if let Some(peer) = peers.get_mut(&id) {
                             peer.remote_set = true;
                             if let Some(media) = &peer.media {
@@ -374,8 +403,8 @@ async fn run_session(
                             }
                         }
                     }
-                    MediaEvent::State { id, state } => { if let Some(peer) = peers.get_mut(&id) { peer.status = state; publish(ui, options, muted, &peers); } }
-                    MediaEvent::Failed { id, message } => { if peers.contains_key(&id) { bail!("{message}"); } }
+                    MediaEvent::State { id, state } => { audio.diagnostics.event("connection-state-changed", Some(&id)); if let Some(peer) = peers.get_mut(&id) { peer.status = state; publish(ui, options, muted, &peers); } }
+                    MediaEvent::Failed { id, message } => { audio.diagnostics.event("media-error", Some(&id)); if peers.contains_key(&id) { bail!("{message}"); } }
                     #[cfg(test)]
                     MediaEvent::Audio(_) => (),
                 }

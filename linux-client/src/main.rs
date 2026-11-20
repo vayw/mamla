@@ -1,3 +1,4 @@
+mod diagnostics;
 mod engine;
 mod gate;
 mod media;
@@ -60,6 +61,7 @@ fn entry(parent: &gtk::Box, title: &str, value: &str, placeholder: &str) -> gtk:
 }
 
 fn build(app: &gtk::Application, smoke: bool) {
+    let diagnostics = Arc::new(diagnostics::Diagnostics::default());
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Mamla")
@@ -215,6 +217,83 @@ fn build(app: &gtk::Application, smoke: bool) {
     status.set_selectable(true);
     layout.append(&status);
 
+    let debug_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let debug_enable = gtk::CheckButton::with_label("Собирать диагностику");
+    debug_box.append(&debug_enable);
+    let debug_hint = gtk::Label::new(Some("Включите на обоих устройствах. При сбое сохраните отчёты до переподключения. Голос, имена, адреса и ключи не сохраняются. История доступна после выхода из комнаты."));
+    debug_hint.set_wrap(true);
+    debug_hint.set_xalign(0.0);
+    debug_box.append(&debug_hint);
+    let debug_status = gtk::Label::new(Some("Диагностика выключена."));
+    debug_status.set_wrap(true);
+    debug_status.set_selectable(true);
+    debug_status.set_xalign(0.0);
+    debug_box.append(&debug_status);
+    let debug_export = gtk::Button::with_label("Сохранить диагностический отчёт…");
+    debug_export.set_sensitive(false);
+    debug_box.append(&debug_export);
+    let debug_notice = gtk::Label::new(None);
+    debug_notice.set_wrap(true);
+    debug_notice.set_xalign(0.0);
+    debug_box.append(&debug_notice);
+    layout.append(
+        &gtk::Expander::builder()
+            .label("Диагностика звука")
+            .child(&debug_box)
+            .build(),
+    );
+    {
+        let diagnostics = diagnostics.clone();
+        let export = debug_export.clone();
+        debug_enable.connect_toggled(move |button| {
+            diagnostics.set_enabled(button.is_active());
+            export.set_sensitive(true);
+        });
+    }
+    {
+        let diagnostics = diagnostics.clone();
+        let parent = window.downgrade();
+        let notice = debug_notice.clone();
+        debug_export.connect_clicked(move |_| {
+            let Some(parent) = parent.upgrade() else {
+                return;
+            };
+            let report = serde_json::to_string_pretty(&diagnostics.export()).unwrap();
+            let chooser = gtk::FileChooserNative::new(
+                Some("Диагностический отчёт Mamla"),
+                Some(&parent),
+                gtk::FileChooserAction::Save,
+                Some("Сохранить"),
+                Some("Отмена"),
+            );
+            chooser.set_current_name("mamla-diagnostics.json");
+            chooser.set_modal(true);
+            let notice = notice.clone();
+            chooser.connect_response(move |chooser, response| {
+                if response == gtk::ResponseType::Accept {
+                    let saved = chooser.file().and_then(|f| f.path()).is_some_and(|path| {
+                        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(path)
+                            .and_then(|mut f| f.write_all(report.as_bytes()))
+                            .is_ok()
+                    });
+                    notice.set_text(if saved {
+                        "Отчёт сохранён."
+                    } else {
+                        "Не удалось сохранить отчёт. Выберите локальный файл."
+                    });
+                }
+                chooser.destroy();
+            });
+            chooser.show();
+        });
+    }
+
     let people = gtk::ListBox::new();
     people.set_selection_mode(gtk::SelectionMode::None);
     people.add_css_class("boxed-list");
@@ -357,6 +436,7 @@ fn build(app: &gtk::Application, smoke: bool) {
         cert.clone(),
     ];
     for (button, insecure_tls) in [(&join, false), (&join_insecure, true)] {
+        let diagnostics = diagnostics.clone();
         let gate_settings = gate_settings.clone();
         let command = command.clone();
         let connection_insecure = connection_insecure.clone();
@@ -412,8 +492,12 @@ fn build(app: &gtk::Application, smoke: bool) {
             } else {
                 "Подключение…"
             });
-            *command.borrow_mut() =
-                Some(engine::start(options, ui_tx.clone(), gate_settings.clone()));
+            *command.borrow_mut() = Some(engine::start(
+                options,
+                ui_tx.clone(),
+                gate_settings.clone(),
+                diagnostics.clone(),
+            ));
         });
     }
     {
@@ -450,9 +534,16 @@ fn build(app: &gtk::Application, smoke: bool) {
         });
     }
     let weak_window = window.downgrade();
+    let mut debug_refresh = std::time::Instant::now();
     glib::timeout_add_local(Duration::from_millis(60), move || {
         if weak_window.upgrade().is_none() {
             return glib::ControlFlow::Break;
+        }
+        if debug_refresh.elapsed() >= Duration::from_secs(1) {
+            if diagnostics.enabled() {
+                debug_status.set_text(&diagnostics.summary());
+            }
+            debug_refresh = std::time::Instant::now();
         }
         for event in vault_rx.try_iter() {
             match event {

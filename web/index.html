@@ -47,6 +47,13 @@
       </div>
       <p id="message" role="status" aria-live="polite"></p>
       <button id="play" class="secondary" type="button" hidden>Включить звук участников</button>
+      <details class="diagnostics">
+        <summary>Диагностика звука</summary>
+        <label class="debug-toggle"><input id="debug-enable" type="checkbox"> Собирать диагностику</label>
+        <p class="hint">Включите на обоих устройствах. При сбое скачайте отчёты до переподключения. Голос, имена, адреса и ключи в отчёт не попадают. Последние 300 замеров остаются доступны после выхода из комнаты.</p>
+        <pre id="debug-status" role="status">Диагностика выключена.</pre>
+        <button id="debug-export" class="secondary" type="button" disabled>Скачать диагностический отчёт</button>
+      </details>
       <div class="room-footer"><span><span class="dot small"></span> До 6 участников</span><span id="access-mode">Без регистрации</span></div>
       <button id="service-logout" class="secondary" type="button" hidden>Выйти из сервиса</button>
     </section>

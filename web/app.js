@@ -1,4 +1,5 @@
 import { accessAllowed, accessExpired } from '/auth.js';
+import { Diagnostics } from '/diagnostics.js';
 
 const $ = (id) => document.getElementById(id);
 const room = new URLSearchParams(location.search).get('room') || makeRoom();
@@ -12,6 +13,8 @@ let meters = new Map();
 let meterTimer = null;
 let muted = false;
 let config;
+const diagnostics = new Diagnostics();
+let diagnosticsTimer = null;
 
 function makeRoom() {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
@@ -92,6 +95,7 @@ function monitor(id, media, el) {
 function removePeer(id) {
   const peer = peers.get(id);
   if (!peer) return;
+  diagnostics.event('peer-left', id);
   peers.delete(id);
   peer.pc?.close();
   if (peer.audio) { peer.audio.pause(); peer.audio.srcObject = null; peer.audio.remove(); }
@@ -113,19 +117,31 @@ function connection(peer) {
   for (const track of stream.getTracks()) pc.addTrack(track, stream);
   pc.onicecandidate = ({ candidate }) => {
     if (candidate && self) signal(peer, 'ice', candidate.toJSON()).catch(() => {
+      diagnostics.event('ice-send-error', peer.id);
       if (peers.has(peer.id)) message('Не удалось передать ICE-кандидат. Если звук не появился, перезайдите.', true);
     });
   };
-  pc.onconnectionstatechange = () => { if (peers.has(peer.id)) peerStatus(peer); };
-  pc.ontrack = ({ streams }) => {
-    if (peer.audio || !streams[0]) return;
+  pc.onconnectionstatechange = () => {
+    diagnostics.event('connection-state-changed', peer.id, false, pc.connectionState);
+    if (peers.has(peer.id)) peerStatus(peer);
+  };
+  pc.oniceconnectionstatechange = () => diagnostics.event('ice-state-changed', peer.id, false, pc.iceConnectionState);
+  pc.ontrack = ({ track, streams }) => {
+    if (peer.audio || track.kind !== 'audio') return;
+    diagnostics.event('remote-audio-track', peer.id);
+    // A remote track need not belong to a stream (for example, native SDP
+    // without msid). It still carries audio and must be attached to an element.
+    const media = streams[0] || new MediaStream([track]);
     const audio = document.createElement('audio');
     audio.autoplay = true;
-    audio.srcObject = streams[0];
+    audio.srcObject = media;
     peer.audio = audio;
     document.body.append(audio);
-    audio.play().catch(() => { $('play').hidden = false; });
-    monitor(peer.id, streams[0], peer.el);
+    audio.play().then(() => diagnostics.event('playback-started', peer.id)).catch(() => {
+      diagnostics.event('playback-blocked', peer.id);
+      $('play').hidden = false;
+    });
+    monitor(peer.id, media, peer.el);
   };
   return pc;
 }
@@ -135,6 +151,7 @@ async function offer(person) {
   const pc = connection(peer);
   await pc.setLocalDescription(await pc.createOffer());
   await signal(peer, 'offer', pc.localDescription);
+  diagnostics.event('offer-sent', peer.id);
 }
 
 async function receiveSignal(data) {
@@ -149,16 +166,19 @@ async function receiveSignal(data) {
   if (data.type !== 'offer' && data.type !== 'answer') return;
   if (data.data?.type !== data.type) throw new Error('Некорректный SDP');
   await pc.setRemoteDescription(data.data);
+  diagnostics.event(data.type === 'offer' ? 'offer-applied' : 'answer-applied', peer.id);
   for (const candidate of peer.candidates.splice(0)) await pc.addIceCandidate(candidate);
   if (data.type === 'offer') {
     await pc.setLocalDescription(await pc.createAnswer());
     await signal(peer, 'answer', pc.localDescription);
+    diagnostics.event('answer-sent', peer.id);
   }
 }
 
 async function onEvent(event) {
   const { type, data } = event;
   if (type === 'ready') {
+    diagnostics.event('signaling-ready');
     for (const person of data.peers) await offer(person);
     updateCount();
   } else if (type === 'peer-joined') {
@@ -194,7 +214,10 @@ async function listen(session, abort) {
         if (self !== session) return;
         if (frame.startsWith('data: ')) {
           try { await onEvent(JSON.parse(frame.slice(6))); }
-          catch { message('Не удалось соединиться с одним из участников. Попробуйте войти снова.', true); }
+          catch {
+            diagnostics.event('signaling-event-error');
+            message('Не удалось соединиться с одним из участников. Попробуйте войти снова.', true);
+          }
         }
       }
     }
@@ -213,6 +236,7 @@ function friendlyError(error) {
 
 function leave(notify = true) {
   const session = self;
+  if (session) diagnostics.event('session-left');
   self = null;
   eventsAbort?.abort();
   eventsAbort = null;
@@ -242,6 +266,7 @@ $('join-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (self || $('join').disabled) return;
   $('join').disabled = true;
+  diagnostics.event('join-started');
   message('Подключаем микрофон…');
   try {
     if (!await accessAllowed()) { $('join').disabled = false; return; }
@@ -256,9 +281,15 @@ $('join-form').addEventListener('submit', async (event) => {
     }
     config = await response.json();
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+    diagnostics.event('microphone-opened');
+    for (const track of stream.getAudioTracks()) {
+      track.onmute = () => diagnostics.event('microphone-data-muted');
+      track.onunmute = () => diagnostics.event('microphone-data-resumed');
+    }
     const name = $('name').value.trim();
     self = await api('join', { room, name });
     const session = self;
+    diagnostics.event('session-joined');
     muted = false;
     try {
       audioContext = new AudioContext();
@@ -270,6 +301,7 @@ $('join-form').addEventListener('submit', async (event) => {
       for (const [id, meter] of meters) {
         meter.analyser.getByteTimeDomainData(meter.samples);
         const rms = Math.sqrt(meter.samples.reduce((sum, n) => sum + ((n - 128) / 128) ** 2, 0) / meter.samples.length);
+        meter.rms = rms;
         const isMuted = id === self?.id ? muted : peers.get(id)?.muted;
         meter.el.classList.toggle('speaking', !isMuted && rms > 0.025);
       }
@@ -281,6 +313,7 @@ $('join-form').addEventListener('submit', async (event) => {
     eventsAbort = new AbortController();
     listen(session, eventsAbort).catch((error) => {
       if (self === session && error.name !== 'AbortError') {
+        diagnostics.event('signaling-disconnected');
         // Closing SSE already removes this session on the server. Avoid a
         // redundant leave request that would report 401 for the expired token.
         leave(false);
@@ -288,9 +321,11 @@ $('join-form').addEventListener('submit', async (event) => {
       }
     });
     stream.getAudioTracks()[0].onended = () => {
+      diagnostics.event('microphone-ended');
       if (self === session) { leave(); message('Микрофон отключился. Подключите его и войдите снова.', true); }
     };
   } catch (error) {
+    diagnostics.event('join-error');
     leave();
     message(friendlyError(error), true);
   }
@@ -300,6 +335,7 @@ $('mute').addEventListener('click', async () => {
   if (!self || !stream) return;
   const session = self;
   muted = !muted;
+  diagnostics.event(muted ? 'microphone-disabled' : 'microphone-enabled');
   for (const track of stream.getAudioTracks()) track.enabled = !muted;
   $('mute').textContent = muted ? 'Включить микрофон' : 'Выключить микрофон';
   $('mute').setAttribute('aria-pressed', String(muted));
@@ -319,10 +355,44 @@ $('copy').addEventListener('click', async () => {
 });
 $('play').addEventListener('click', async () => {
   try {
-    await audioContext?.resume();
-    await Promise.all([...peers.values()].filter((p) => p.audio).map((p) => p.audio.play()));
+    // Start every playback operation inside the click's user activation.
+    // Awaiting resume first can lose that activation in autoplay-restricted browsers.
+    await Promise.all([
+      audioContext?.resume(),
+      ...[...peers.values()].filter((p) => p.audio).map((p) => p.audio.play()),
+    ]);
     $('play').hidden = true;
-  } catch { message('Браузер пока блокирует звук. Нажмите ещё раз.', true); }
+    diagnostics.event('manual-playback-started');
+  } catch {
+    diagnostics.event('manual-playback-blocked');
+    message('Браузер пока блокирует звук. Нажмите ещё раз.', true);
+  }
+});
+
+$('debug-enable').addEventListener('change', () => {
+  diagnostics.setEnabled($('debug-enable').checked);
+  clearInterval(diagnosticsTimer);
+  $('debug-export').disabled = false;
+  const update = async () => {
+    await diagnostics.sample(stream, peers, audioContext,
+      audioContext?.state === 'running' ? meters.get(self?.id)?.rms : null);
+    $('debug-status').textContent = diagnostics.summary();
+  };
+  if (diagnostics.enabled) {
+    update();
+    diagnosticsTimer = setInterval(update, 1000);
+  }
+});
+$('debug-export').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(diagnostics.report(), null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'mamla-diagnostics.json';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 window.addEventListener('pagehide', () => leave());
 window.addEventListener('mamla:access-lost', () => leave(false));

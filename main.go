@@ -314,14 +314,14 @@ func (v *voiceServer) handler() http.Handler {
 			fail(w, 404, "Участник отключился")
 		})
 	})
-	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/auth.js": "auth.js", "/style.css": "style.css"} {
+	for path, file := range map[string]string{"/": "index.html", "/app.js": "app.js", "/auth.js": "auth.js", "/diagnostics.js": "diagnostics.js", "/style.css": "style.css"} {
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != path {
 				http.NotFound(w, r)
 				return
 			}
 			body, _ := assets.ReadFile("web/" + file)
-			contentType := map[string]string{"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "auth.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
+			contentType := map[string]string{"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "auth.js": "text/javascript; charset=utf-8", "diagnostics.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}
 			w.Header().Set("Content-Type", contentType[file])
 			_, _ = w.Write(body)
 		})

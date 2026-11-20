@@ -22,6 +22,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn snapshot(&self) -> (bool, i32) {
+        (
+            self.enabled.load(Ordering::Relaxed),
+            self.threshold_db.load(Ordering::Relaxed),
+        )
+    }
     pub fn enable(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
